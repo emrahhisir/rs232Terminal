@@ -1,0 +1,42 @@
+name: Windows EXE Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:   # Elle tetikleme butonu
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Kodu indir
+        uses: actions/checkout@v4
+
+      - name: Python kur (3.11)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Bagimliliklari yukle
+        run: |
+          pip install pyqt5 pyserial pyzipper pyinstaller
+
+      - name: EXE olustur
+        run: |
+          pyinstaller rs232_transfer.spec --noconfirm
+
+      - name: EXE boyutunu goster
+        run: |
+          $size = (Get-Item dist\RS232Transfer.exe).length / 1MB
+          Write-Host ("EXE boyutu: {0:N2} MB" -f $size)
+        shell: pwsh
+
+      - name: Artifact olarak yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: RS232Transfer-Windows
+          path: dist/RS232Transfer.exe
+          retention-days: 30
