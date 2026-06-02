@@ -278,11 +278,12 @@ class PortAlThread(QThread):
     sinyal_info     = pyqtSignal(int, int, int)      # port_idx, toplam_chunk, zip_boyutu
     sinyal_bitti    = pyqtSignal(int, bool)          # port_idx, basarili
 
-    def __init__(self, port_idx: int, port_adi: str, baud: int):
+    def __init__(self, port_idx: int, port_adi: str, baud: int, tek_port: bool = False):
         super().__init__()
         self.port_idx  = port_idx
         self.port_adi  = port_adi
         self.baud      = baud
+        self.tek_port  = tek_port
         self.basarili  = False
         self._dur      = False
         self._benim_toplam = 0
@@ -339,10 +340,12 @@ class PortAlThread(QThread):
         )
         self.sinyal_info.emit(pi, toplam_chunk, zip_boyutu)
 
-        # Bu porta ait beklenen chunk sayisi:
-        # port0 = ciftsiz indisler (0,2,4,...) → ceil(toplam/2)
-        # port1 = teksayili indisler (1,3,5,...) → floor(toplam/2)
-        self._benim_toplam = (toplam_chunk + (1 - pi)) // 2
+        if self.tek_port:
+            self._benim_toplam = toplam_chunk
+        else:
+            # port0 = cift indisler (0,2,4,...) → ceil(toplam/2)
+            # port1 = tek indisler (1,3,5,...) → floor(toplam/2)
+            self._benim_toplam = (toplam_chunk + (1 - pi)) // 2
 
         ser.write(paket_olustur(PKT_ACK, 0))
 
@@ -386,7 +389,8 @@ class GonderYoneticisi(QThread):
 
     def __init__(self, ogeler: List[str], sifre: str,
                  port1: str, port2: str, baud1: int, baud2: int,
-                 chunk_boyutu: int = VARSAYILAN_CHUNK):
+                 chunk_boyutu: int = VARSAYILAN_CHUNK,
+                 tek_port: bool = False):
         super().__init__()
         self.ogeler      = ogeler
         self.sifre       = sifre
@@ -395,6 +399,7 @@ class GonderYoneticisi(QThread):
         self.baud1       = baud1
         self.baud2       = baud2
         self.chunk_boyutu = chunk_boyutu
+        self.tek_port    = tek_port
         self._yuzde      = [0, 0]
         self._kilit      = threading.Lock()
 
@@ -415,25 +420,32 @@ class GonderYoneticisi(QThread):
             tum_chunklar.append((i, zip_verisi[offset:offset + self.chunk_boyutu]))
 
         toplam = len(tum_chunklar)
-        c0 = [(s, d) for s, d in tum_chunklar if s % 2 == 0]
-        c1 = [(s, d) for s, d in tum_chunklar if s % 2 == 1]
-        self.sinyal_log.emit(
-            f"Toplam {toplam} chunk → Port1: {len(c0)}, Port2: {len(c1)}"
-        )
 
-        t0 = PortGonderThread(0, self.port1, self.baud1, c0, toplam, n)
-        t1 = PortGonderThread(1, self.port2, self.baud2, c1, toplam, n)
+        if self.tek_port:
+            self.sinyal_log.emit(f"Toplam {toplam} chunk → Port1: {toplam} (tek port modu)")
+            t0 = PortGonderThread(0, self.port1, self.baud1, tum_chunklar, toplam, n)
+            t0.sinyal_ilerleme.connect(self._ilerleme_guncelle)
+            t0.sinyal_log.connect(self.sinyal_log)
+            t0.start()
+            t0.wait()
+            ok = t0.basarili
+        else:
+            c0 = [(s, d) for s, d in tum_chunklar if s % 2 == 0]
+            c1 = [(s, d) for s, d in tum_chunklar if s % 2 == 1]
+            self.sinyal_log.emit(
+                f"Toplam {toplam} chunk → Port1: {len(c0)}, Port2: {len(c1)}"
+            )
+            t0 = PortGonderThread(0, self.port1, self.baud1, c0, toplam, n)
+            t1 = PortGonderThread(1, self.port2, self.baud2, c1, toplam, n)
+            for t in (t0, t1):
+                t.sinyal_ilerleme.connect(self._ilerleme_guncelle)
+                t.sinyal_log.connect(self.sinyal_log)
+            t0.start()
+            t1.start()
+            t0.wait()
+            t1.wait()
+            ok = t0.basarili and t1.basarili
 
-        for t in (t0, t1):
-            t.sinyal_ilerleme.connect(self._ilerleme_guncelle)
-            t.sinyal_log.connect(self.sinyal_log)
-
-        t0.start()
-        t1.start()
-        t0.wait()
-        t1.wait()
-
-        ok = t0.basarili and t1.basarili
         msg = "Transfer basariyla tamamlandi!" if ok else "Transfer basarisiz oldu."
         self.sinyal_bitti.emit(ok, msg)
 
@@ -441,7 +453,10 @@ class GonderYoneticisi(QThread):
         with self._kilit:
             self._yuzde[pi] = pct
         self.sinyal_port.emit(pi, pct)
-        self.sinyal_genel.emit((self._yuzde[0] + self._yuzde[1]) // 2)
+        if self.tek_port:
+            self.sinyal_genel.emit(pct)
+        else:
+            self.sinyal_genel.emit((self._yuzde[0] + self._yuzde[1]) // 2)
 
 
 # ==============================================================================
@@ -455,7 +470,8 @@ class AlYoneticisi(QThread):
     sinyal_bitti    = pyqtSignal(bool, str)
 
     def __init__(self, sifre: str, hedef_dizin: str,
-                 port1: str, port2: str, baud1: int, baud2: int):
+                 port1: str, port2: str, baud1: int, baud2: int,
+                 tek_port: bool = False):
         super().__init__()
         self.sifre       = sifre
         self.hedef_dizin = hedef_dizin
@@ -463,26 +479,36 @@ class AlYoneticisi(QThread):
         self.port2       = port2
         self.baud1       = baud1
         self.baud2       = baud2
+        self.tek_port    = tek_port
         self._chunklar: Dict[int, bytes] = {}
         self._toplam     = 0
         self._kilit      = threading.Lock()
 
     def run(self):
-        t0 = PortAlThread(0, self.port1, self.baud1)
-        t1 = PortAlThread(1, self.port2, self.baud2)
+        if self.tek_port:
+            t0 = PortAlThread(0, self.port1, self.baud1, tek_port=True)
+            t0.sinyal_log.connect(self.sinyal_log)
+            t0.sinyal_ilerleme.connect(self.sinyal_port)
+            t0.sinyal_chunk.connect(self._chunk_alindi)
+            t0.sinyal_info.connect(self._info_alindi)
+            t0.start()
+            t0.wait()
+            ok = t0.basarili
+        else:
+            t0 = PortAlThread(0, self.port1, self.baud1)
+            t1 = PortAlThread(1, self.port2, self.baud2)
+            for t in (t0, t1):
+                t.sinyal_log.connect(self.sinyal_log)
+                t.sinyal_ilerleme.connect(self.sinyal_port)
+                t.sinyal_chunk.connect(self._chunk_alindi)
+                t.sinyal_info.connect(self._info_alindi)
+            t0.start()
+            t1.start()
+            t0.wait()
+            t1.wait()
+            ok = t0.basarili and t1.basarili
 
-        for t in (t0, t1):
-            t.sinyal_log.connect(self.sinyal_log)
-            t.sinyal_ilerleme.connect(self.sinyal_port)
-            t.sinyal_chunk.connect(self._chunk_alindi)
-            t.sinyal_info.connect(self._info_alindi)
-
-        t0.start()
-        t1.start()
-        t0.wait()
-        t1.wait()
-
-        if not (t0.basarili and t1.basarili):
+        if not ok:
             self.sinyal_bitti.emit(False, "Alim basarisiz oldu.")
             return
 
@@ -644,6 +670,14 @@ class GonderSekmesi(QWidget):
         dg.addLayout(btn_satir)
         ana.addWidget(dosya_grup)
 
+        # --- Port modu ---
+        mod_satir = QHBoxLayout()
+        self.tek_port_cb = QCheckBox("Tek Port Modu (sadece Port 1 kullanilir)")
+        self.tek_port_cb.toggled.connect(self._tek_port_guncelle)
+        mod_satir.addWidget(self.tek_port_cb)
+        mod_satir.addStretch()
+        ana.addLayout(mod_satir)
+
         # --- Port ayarlari ---
         port_satir = QHBoxLayout()
         self.port1 = PortSeciciWidget("Port 1 (Cift indisler: 0, 2, 4...)")
@@ -698,12 +732,22 @@ class GonderSekmesi(QWidget):
 
         # --- Gonder butonu ---
         self.btn_gonder = QPushButton("GONDER")
+
         self.btn_gonder.setFixedHeight(42)
         self.btn_gonder.setFont(QFont('Arial', 12, QFont.Bold))
         self.btn_gonder.clicked.connect(self._gonderi_baslat)
         ana.addWidget(self.btn_gonder)
 
     # -- Yardimci metodlar --
+
+    def _tek_port_guncelle(self, tek: bool):
+        self.port2.setEnabled(not tek)
+        self.bar_port2.setEnabled(not tek)
+        if tek:
+            self.bar_port2.setValue(0)
+        self.port1.setTitle(
+            "Port 1" if tek else "Port 1 (Cift indisler: 0, 2, 4...)"
+        )
 
     def _dosya_ekle(self):
         dosyalar, _ = QFileDialog.getOpenFileNames(self, "Dosya Sec")
@@ -746,14 +790,19 @@ class GonderSekmesi(QWidget):
             QMessageBox.warning(self, "Uyari", "Sifre girmediniz.")
             return
 
+        tek_port = self.tek_port_cb.isChecked()
         p1 = self.port1.port
         p2 = self.port2.port
-        if not p1 or not p2:
-            QMessageBox.warning(self, "Uyari", "Her iki port da secilmeli.")
+        if not p1:
+            QMessageBox.warning(self, "Uyari", "Port 1 secilmedi.")
             return
-        if p1 == p2:
-            QMessageBox.warning(self, "Uyari", "Iki port birbirinden farkli olmali.")
-            return
+        if not tek_port:
+            if not p2:
+                QMessageBox.warning(self, "Uyari", "Port 2 secilmedi.")
+                return
+            if p1 == p2:
+                QMessageBox.warning(self, "Uyari", "Iki port birbirinden farkli olmali.")
+                return
 
         self.btn_gonder.setEnabled(False)
         for bar in (self.bar_port1, self.bar_port2, self.bar_genel):
@@ -762,7 +811,7 @@ class GonderSekmesi(QWidget):
         self._yonetici = GonderYoneticisi(
             ogeler, sifre, p1, p2,
             self.port1.baud, self.port2.baud,
-            self._chunk_boyutu()
+            self._chunk_boyutu(), tek_port
         )
         self._yonetici.sinyal_log.connect(self.log.log_ekle)
         self._yonetici.sinyal_port.connect(self._port_ilerleme)
@@ -808,6 +857,14 @@ class AlSekmesi(QWidget):
         gozat_btn.clicked.connect(self._cikti_sec)
         cg.addWidget(gozat_btn)
         ana.addWidget(cikti_grup)
+
+        # --- Port modu ---
+        mod_satir = QHBoxLayout()
+        self.tek_port_cb = QCheckBox("Tek Port Modu (sadece Port 1 kullanilir)")
+        self.tek_port_cb.toggled.connect(self._tek_port_guncelle)
+        mod_satir.addWidget(self.tek_port_cb)
+        mod_satir.addStretch()
+        ana.addLayout(mod_satir)
 
         # --- Port ayarlari ---
         port_satir = QHBoxLayout()
@@ -855,6 +912,12 @@ class AlSekmesi(QWidget):
         self.btn_al.clicked.connect(self._alimi_baslat)
         ana.addWidget(self.btn_al)
 
+    def _tek_port_guncelle(self, tek: bool):
+        self.port2.setEnabled(not tek)
+        self.bar_port2.setEnabled(not tek)
+        if tek:
+            self.bar_port2.setValue(0)
+
     def _cikti_sec(self):
         d = QFileDialog.getExistingDirectory(self, "Cikti Klasoru Sec")
         if d:
@@ -871,14 +934,19 @@ class AlSekmesi(QWidget):
             QMessageBox.warning(self, "Uyari", "Sifre girmediniz.")
             return
 
+        tek_port = self.tek_port_cb.isChecked()
         p1 = self.port1.port
         p2 = self.port2.port
-        if not p1 or not p2:
-            QMessageBox.warning(self, "Uyari", "Her iki port da secilmeli.")
+        if not p1:
+            QMessageBox.warning(self, "Uyari", "Port 1 secilmedi.")
             return
-        if p1 == p2:
-            QMessageBox.warning(self, "Uyari", "Iki port birbirinden farkli olmali.")
-            return
+        if not tek_port:
+            if not p2:
+                QMessageBox.warning(self, "Uyari", "Port 2 secilmedi.")
+                return
+            if p1 == p2:
+                QMessageBox.warning(self, "Uyari", "Iki port birbirinden farkli olmali.")
+                return
 
         self.btn_al.setEnabled(False)
         for bar in (self.bar_port1, self.bar_port2, self.bar_genel):
@@ -886,7 +954,7 @@ class AlSekmesi(QWidget):
 
         self._yonetici = AlYoneticisi(
             sifre, cikti, p1, p2,
-            self.port1.baud, self.port2.baud
+            self.port1.baud, self.port2.baud, tek_port
         )
         self._yonetici.sinyal_log.connect(self.log.log_ekle)
         self._yonetici.sinyal_port.connect(self._port_ilerleme)
