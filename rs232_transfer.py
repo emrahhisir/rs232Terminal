@@ -163,7 +163,8 @@ class PortGonderThread(QThread):
 
     def __init__(self, port_idx: int, port_adi: str, baud: int,
                  benim_chunklar: List[Tuple[int, bytes]],
-                 toplam_chunk: int, zip_boyutu: int):
+                 toplam_chunk: int, zip_boyutu: int,
+                 bariyer: Optional[threading.Barrier] = None):
         super().__init__()
         self.port_idx       = port_idx
         self.port_adi       = port_adi
@@ -171,6 +172,7 @@ class PortGonderThread(QThread):
         self.benim_chunklar = benim_chunklar
         self.toplam_chunk   = toplam_chunk
         self.zip_boyutu     = zip_boyutu
+        self.bariyer        = bariyer
         self.basarili       = False
         self._dur           = False
 
@@ -258,6 +260,17 @@ class PortGonderThread(QThread):
             self.sinyal_log.emit(f"[Port{pi+1}] INFO ACK alinamadi, iptal")
             return False
 
+        # Senkronizasyon bariyeri: diger port da handshake tamamlayana kadar bekle.
+        # Boylece her iki port chunk gondermeye ayni anda baslar; bant genisligi adil paylasilir.
+        if self.bariyer is not None:
+            self.sinyal_log.emit(f"[Port{pi+1}] Diger port hazir olana kadar bekleniyor...")
+            try:
+                self.bariyer.wait(timeout=90)
+                self.sinyal_log.emit(f"[Port{pi+1}] Senkronizasyon tamam — transfer basliyor")
+            except threading.BrokenBarrierError:
+                self.sinyal_log.emit(f"[Port{pi+1}] Senkronizasyon basarisiz (diger port hazir olamadi)")
+                return False
+
         # Chunk'lari gonder
         toplam = len(self.benim_chunklar)
         for i, (seq, veri) in enumerate(self.benim_chunklar):
@@ -312,12 +325,15 @@ class PortAlThread(QThread):
     sinyal_info     = pyqtSignal(int, int, int)      # port_idx, toplam_chunk, zip_boyutu
     sinyal_bitti    = pyqtSignal(int, bool)          # port_idx, basarili
 
-    def __init__(self, port_idx: int, port_adi: str, baud: int, tek_port: bool = False):
+    def __init__(self, port_idx: int, port_adi: str, baud: int,
+                 tek_port: bool = False,
+                 bariyer: Optional[threading.Barrier] = None):
         super().__init__()
         self.port_idx  = port_idx
         self.port_adi  = port_adi
         self.baud      = baud
         self.tek_port  = tek_port
+        self.bariyer   = bariyer
         self.basarili  = False
         self._dur      = False
         self._benim_toplam = 0
@@ -394,6 +410,14 @@ class PortAlThread(QThread):
             self._benim_toplam = (toplam_chunk + (1 - pi)) // 2
 
         ser.write(paket_olustur(PKT_ACK, 0))
+
+        # Senkronizasyon bariyeri: diger port da handshake tamamlayana kadar bekle
+        if self.bariyer is not None:
+            try:
+                self.bariyer.wait(timeout=90)
+            except threading.BrokenBarrierError:
+                self.sinyal_log.emit(f"[Port{pi+1}] Senkronizasyon basarisiz")
+                return False
 
         # Chunklari al
         alinan = 0
@@ -481,8 +505,9 @@ class GonderYoneticisi(QThread):
             self.sinyal_log.emit(
                 f"Toplam {toplam} chunk → Port1: {len(c0)}, Port2: {len(c1)}"
             )
-            t0 = PortGonderThread(0, self.port1, self.baud1, c0, toplam, n)
-            t1 = PortGonderThread(1, self.port2, self.baud2, c1, toplam, n)
+            bariyer = threading.Barrier(2)
+            t0 = PortGonderThread(0, self.port1, self.baud1, c0, toplam, n, bariyer=bariyer)
+            t1 = PortGonderThread(1, self.port2, self.baud2, c1, toplam, n, bariyer=bariyer)
             for t in (t0, t1):
                 t.sinyal_ilerleme.connect(self._ilerleme_guncelle)
                 t.sinyal_log.connect(self.sinyal_log)
@@ -541,8 +566,9 @@ class AlYoneticisi(QThread):
             t0.wait()
             ok = t0.basarili
         else:
-            t0 = PortAlThread(0, self.port1, self.baud1)
-            t1 = PortAlThread(1, self.port2, self.baud2)
+            bariyer = threading.Barrier(2)
+            t0 = PortAlThread(0, self.port1, self.baud1, bariyer=bariyer)
+            t1 = PortAlThread(1, self.port2, self.baud2, bariyer=bariyer)
             for t in (t0, t1):
                 t.sinyal_log.connect(self.sinyal_log)
                 t.sinyal_ilerleme.connect(self.sinyal_port)
