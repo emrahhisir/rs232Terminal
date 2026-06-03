@@ -465,6 +465,156 @@ class EntegrasyonTestleri(unittest.TestCase):
 
 
 # ==============================================================================
+# 5. GECIKME VE PAKET KAYBI DAYANIKLILIK TESTLERI
+# ==============================================================================
+
+class SahtePortGecikmeli(SahtePort):
+    """Alici taraf READY'yi gec gonderir (gonderici biraz beklemek zorunda)."""
+
+    def __init__(self, *args, gecikme: float = 0.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._gecikme  = gecikme
+        self._ilk_yaz  = True
+
+    def write(self, data: bytes) -> int:
+        if self._ilk_yaz and self._gecikme > 0:
+            time.sleep(self._gecikme)
+            self._ilk_yaz = False
+        return super().write(data)
+
+
+class SahteAlThreadGecikmeli(SahteAlThread):
+    """Ilk READY paketini atmadan once bekler."""
+    def __init__(self, *args, gecikme: float = 0.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._gecikme = gecikme
+
+    def run(self):
+        if self._gecikme > 0:
+            time.sleep(self._gecikme)
+        super().run()
+
+
+class DayaniklilikTestleri(unittest.TestCase):
+
+    def _transfer_yap(self, gecikme_sn: float, chunk_boyutu: int = 256):
+        """
+        Alici thread'leri `gecikme_sn` saniye gec baslar.
+        Gonderici bu sureyi READY bekleme dongusunde gecirmelidir.
+        """
+        SIFRE = 'test'
+        with tempfile.TemporaryDirectory() as kaynak:
+            f = os.path.join(kaynak, 'test.bin')
+            open(f, 'wb').write(os.urandom(20 * 1024))
+            zip_verisi = zip_olustur([f], SIFRE)
+
+        n      = len(zip_verisi)
+        tum    = [(i, zip_verisi[o:o + chunk_boyutu])
+                  for i, o in enumerate(range(0, n, chunk_boyutu))]
+        toplam = len(tum)
+        c0     = [(s, d) for s, d in tum if s % 2 == 0]
+        c1     = [(s, d) for s, d in tum if s % 2 == 1]
+
+        g0, a0 = port_cifti_olustur(timeout=2.0)
+        g1, a1 = port_cifti_olustur(timeout=2.0)
+
+        alinan: dict = {}
+        kilit = threading.Lock()
+
+        def chunk_topla(pi, seq, veri):
+            with kilit:
+                alinan[seq] = veri
+
+        gt0 = SahteGonderThread(0, '', 0, c0, toplam, n, sahte_ser=g0)
+        gt1 = SahteGonderThread(1, '', 0, c1, toplam, n, sahte_ser=g1)
+        at0 = SahteAlThreadGecikmeli(0, '', 0, sahte_ser=a0, gecikme=gecikme_sn)
+        at1 = SahteAlThreadGecikmeli(1, '', 0, sahte_ser=a1, gecikme=gecikme_sn)
+
+        at0.sinyal_chunk.connect(chunk_topla, Qt.DirectConnection)
+        at1.sinyal_chunk.connect(chunk_topla, Qt.DirectConnection)
+
+        mesajlar = []
+        for t in (gt0, gt1, at0, at1):
+            t.sinyal_log.connect(lambda m: mesajlar.append(m), Qt.DirectConnection)
+
+        # Gonderici once baslasin (gercek senaryoda Al/Gonder sirasiz baslanir)
+        gt0.start(); gt1.start()
+        time.sleep(0.1)
+        at0.start(); at1.start()
+
+        gt0.wait(90_000); gt1.wait(90_000)
+        at0.wait(90_000); at1.wait(90_000)
+
+        return gt0, gt1, at0, at1, alinan, mesajlar, zip_verisi
+
+    def test_gonderici_once_basliyor(self):
+        """Gonderici 2s once baslar, alici sonra READY gonderir."""
+        gt0, gt1, at0, at1, alinan, mesajlar, zip_verisi = \
+            self._transfer_yap(gecikme_sn=2.0)
+
+        for t, isim in [(gt0,'gt0'),(gt1,'gt1'),(at0,'at0'),(at1,'at1')]:
+            self.assertTrue(t.basarili,
+                f"{isim} basarisiz — log:\n" + '\n'.join(mesajlar))
+
+        geri = b''.join(alinan[i] for i in sorted(alinan))
+        self.assertEqual(geri, zip_verisi, "ZIP verisi bozuldu!")
+        print(f"\n  [OK] Gonderici 2s once basliyor — {len(alinan)} chunk aktarildi.")
+
+    def test_alici_once_basliyor(self):
+        """Alici 2s once baslar ve periyodik READY gonderir, gonderici sonra baslar."""
+        SIFRE = 'test'
+        with tempfile.TemporaryDirectory() as kaynak:
+            f = os.path.join(kaynak, 'test.bin')
+            open(f, 'wb').write(os.urandom(20 * 1024))
+            zip_verisi = zip_olustur([f], SIFRE)
+
+        n      = len(zip_verisi)
+        chunk_boyutu = 256
+        tum    = [(i, zip_verisi[o:o + chunk_boyutu])
+                  for i, o in enumerate(range(0, n, chunk_boyutu))]
+        toplam = len(tum)
+        c0     = [(s, d) for s, d in tum if s % 2 == 0]
+        c1     = [(s, d) for s, d in tum if s % 2 == 1]
+
+        g0, a0 = port_cifti_olustur(timeout=2.0)
+        g1, a1 = port_cifti_olustur(timeout=2.0)
+
+        alinan: dict = {}
+        kilit = threading.Lock()
+        def chunk_topla(pi, seq, veri):
+            with kilit:
+                alinan[seq] = veri
+
+        gt0 = SahteGonderThread(0, '', 0, c0, toplam, n, sahte_ser=g0)
+        gt1 = SahteGonderThread(1, '', 0, c1, toplam, n, sahte_ser=g1)
+        at0 = SahteAlThread(0, '', 0, sahte_ser=a0)
+        at1 = SahteAlThread(1, '', 0, sahte_ser=a1)
+
+        at0.sinyal_chunk.connect(chunk_topla, Qt.DirectConnection)
+        at1.sinyal_chunk.connect(chunk_topla, Qt.DirectConnection)
+
+        mesajlar = []
+        for t in (gt0, gt1, at0, at1):
+            t.sinyal_log.connect(lambda m: mesajlar.append(m), Qt.DirectConnection)
+
+        # Alici 2s once basliyor
+        at0.start(); at1.start()
+        time.sleep(2.0)
+        gt0.start(); gt1.start()
+
+        gt0.wait(90_000); gt1.wait(90_000)
+        at0.wait(90_000); at1.wait(90_000)
+
+        for t, isim in [(gt0,'gt0'),(gt1,'gt1'),(at0,'at0'),(at1,'at1')]:
+            self.assertTrue(t.basarili,
+                f"{isim} basarisiz — log:\n" + '\n'.join(mesajlar))
+
+        geri = b''.join(alinan[i] for i in sorted(alinan))
+        self.assertEqual(geri, zip_verisi)
+        print(f"\n  [OK] Alici 2s once basliyor — {len(alinan)} chunk aktarildi.")
+
+
+# ==============================================================================
 # CALISTIR
 # ==============================================================================
 

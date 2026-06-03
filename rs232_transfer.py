@@ -208,13 +208,14 @@ class PortGonderThread(QThread):
         pi = self.port_idx
         self.sinyal_log.emit(f"[Port{pi+1}] Alici bekleniyor...")
 
-        # READY bekle — yanlış tipli paket gelirse yoksay, deadline dolana kadar dene
+        # READY bekle — yanlış tipli paket veya timeout gelirse yoksay,
+        # deadline dolana kadar tekrar dene (continue, break degil)
         bitis = time.monotonic() + HAZIR_BEKLEME
         hazir = False
         while time.monotonic() < bitis:
             kalan = bitis - time.monotonic()
             try:
-                tip, _, _ = paket_oku(ser, min(kalan, 5.0))
+                tip, _, _ = paket_oku(ser, min(kalan, 2.0))
                 if tip == PKT_READY:
                     hazir = True
                     break
@@ -223,7 +224,7 @@ class PortGonderThread(QThread):
                     return False
                 self.sinyal_log.emit(f"[Port{pi+1}] READY bekleniyor, gelen tip: {tip:#x} (yoksayildi)")
             except TimeoutError:
-                break
+                continue  # Süre varsa döngüye devam et
         if not hazir:
             self.sinyal_log.emit(f"[Port{pi+1}] Alici READY gondermedi (zaman asimi)")
             return False
