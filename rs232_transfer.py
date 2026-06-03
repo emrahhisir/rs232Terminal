@@ -188,7 +188,6 @@ class PortGonderThread(QThread):
                 timeout=1, write_timeout=5,
                 rtscts=False, dsrdtr=False
             )
-            ser.reset_input_buffer()
             ser.reset_output_buffer()
         except serial.SerialException as e:
             self.sinyal_log.emit(f"[Port{pi+1}] Acılamadı: {e}")
@@ -231,16 +230,28 @@ class PortGonderThread(QThread):
 
         self.sinyal_log.emit(f"[Port{pi+1}] Alici hazir — INFO gonderiliyor...")
 
-        # INFO paketi gonder
+        # INFO paketi gonder, ACK bekle
+        # Not: alici periyodik READY gonderiyor olabilir, bunlari yoksay
         info_veri = struct.pack('>IQ', self.toplam_chunk, self.zip_boyutu)
         for deneme in range(MAX_DENEME):
             ser.write(paket_olustur(PKT_INFO, 0, info_veri))
-            try:
-                tip, _, _ = paket_oku(ser, ACK_BEKLEME)
-                if tip == PKT_ACK:
+            bitis_ack = time.monotonic() + ACK_BEKLEME
+            ack_alindi = False
+            while time.monotonic() < bitis_ack:
+                kalan = bitis_ack - time.monotonic()
+                try:
+                    tip, _, _ = paket_oku(ser, min(kalan, 2.0))
+                    if tip == PKT_ACK:
+                        ack_alindi = True
+                        break
+                    if tip == PKT_ABORT:
+                        self.sinyal_log.emit(f"[Port{pi+1}] ABORT alindi")
+                        return False
+                    # READY veya baska tip: yoksay, ACK beklemeye devam
+                except TimeoutError:
                     break
-            except TimeoutError:
-                pass
+            if ack_alindi:
+                break
             self.sinyal_log.emit(f"[Port{pi+1}] INFO ACK bekleniyor ({deneme+1}/{MAX_DENEME})...")
         else:
             self.sinyal_log.emit(f"[Port{pi+1}] INFO ACK alinamadi, iptal")
@@ -324,7 +335,6 @@ class PortAlThread(QThread):
                 timeout=1, write_timeout=5,
                 rtscts=False, dsrdtr=False
             )
-            ser.reset_input_buffer()
             ser.reset_output_buffer()
         except serial.SerialException as e:
             self.sinyal_log.emit(f"[Port{pi+1}] Acılamadı: {e}")
@@ -344,17 +354,17 @@ class PortAlThread(QThread):
     def _al(self, ser: serial.Serial) -> bool:
         pi = self.port_idx
 
-        # READY gonder
-        ser.write(paket_olustur(PKT_READY, 0))
-        self.sinyal_log.emit(f"[Port{pi+1}] READY gonderildi, INFO bekleniyor...")
-
-        # INFO bekle — yanlış tipli paket gelirse yoksay, deadline dolana kadar dene
+        # INFO gelene kadar periyodik READY gonder (her ~2s'de bir tekrarla).
+        # Boylece gonderici ne zaman baslarsa baslasin READY'yi yakalar,
+        # port acilindan sonra karsinin gonderdiği READY kaybolsa bile sorun olmaz.
+        self.sinyal_log.emit(f"[Port{pi+1}] Gonderici bekleniyor (READY gonderiliyor)...")
         bitis = time.monotonic() + HAZIR_BEKLEME
         info_veri = None
         while time.monotonic() < bitis:
+            ser.write(paket_olustur(PKT_READY, 0))
             kalan = bitis - time.monotonic()
             try:
-                tip, _, veri = paket_oku(ser, min(kalan, 5.0))
+                tip, _, veri = paket_oku(ser, min(kalan, 2.0))
                 if tip == PKT_INFO and len(veri) >= 12:
                     info_veri = veri
                     break
@@ -363,7 +373,7 @@ class PortAlThread(QThread):
                     return False
                 self.sinyal_log.emit(f"[Port{pi+1}] INFO bekleniyor, gelen tip: {tip:#x} (yoksayildi)")
             except TimeoutError:
-                break
+                continue  # Tekrar READY gonder
         if info_veri is None:
             self.sinyal_log.emit(f"[Port{pi+1}] INFO paketi alinamadi (zaman asimi)")
             return False
