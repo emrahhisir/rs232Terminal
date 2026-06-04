@@ -206,6 +206,14 @@ class PortGonderThread(QThread):
 
         self.sinyal_bitti.emit(pi, self.basarili)
 
+    def _abort_bariyer(self):
+        """Handshake basarisiz olursa bariyeri iptal et; bekleyen diger port aninda hata alsin."""
+        if self.bariyer is not None:
+            try:
+                self.bariyer.abort()
+            except Exception:
+                pass
+
     def _gonder(self, ser: serial.Serial) -> bool:
         pi = self.port_idx
         self.sinyal_log.emit(f"[Port{pi+1}] Alici bekleniyor...")
@@ -223,12 +231,14 @@ class PortGonderThread(QThread):
                     break
                 if tip == PKT_ABORT:
                     self.sinyal_log.emit(f"[Port{pi+1}] ABORT alindi")
+                    self._abort_bariyer()
                     return False
                 self.sinyal_log.emit(f"[Port{pi+1}] READY bekleniyor, gelen tip: {tip:#x} (yoksayildi)")
             except TimeoutError:
                 continue  # Süre varsa döngüye devam et
         if not hazir:
             self.sinyal_log.emit(f"[Port{pi+1}] Alici READY gondermedi (zaman asimi)")
+            self._abort_bariyer()
             return False
 
         self.sinyal_log.emit(f"[Port{pi+1}] Alici hazir — INFO gonderiliyor...")
@@ -249,6 +259,7 @@ class PortGonderThread(QThread):
                         break
                     if tip == PKT_ABORT:
                         self.sinyal_log.emit(f"[Port{pi+1}] ABORT alindi")
+                        self._abort_bariyer()
                         return False
                     # READY veya baska tip: yoksay, ACK beklemeye devam
                 except TimeoutError:
@@ -258,17 +269,19 @@ class PortGonderThread(QThread):
             self.sinyal_log.emit(f"[Port{pi+1}] INFO ACK bekleniyor ({deneme+1}/{MAX_DENEME})...")
         else:
             self.sinyal_log.emit(f"[Port{pi+1}] INFO ACK alinamadi, iptal")
+            self._abort_bariyer()
             return False
 
         # Senkronizasyon bariyeri: diger port da handshake tamamlayana kadar bekle.
         # Boylece her iki port chunk gondermeye ayni anda baslar; bant genisligi adil paylasilir.
+        # Herhangi bir port handshake'te basarisiz olursa abort() ile bariyer hemen kiriliyor.
         if self.bariyer is not None:
             self.sinyal_log.emit(f"[Port{pi+1}] Diger port hazir olana kadar bekleniyor...")
             try:
-                self.bariyer.wait(timeout=90)
+                self.bariyer.wait(timeout=HAZIR_BEKLEME)
                 self.sinyal_log.emit(f"[Port{pi+1}] Senkronizasyon tamam — transfer basliyor")
             except threading.BrokenBarrierError:
-                self.sinyal_log.emit(f"[Port{pi+1}] Senkronizasyon basarisiz (diger port hazir olamadi)")
+                self.sinyal_log.emit(f"[Port{pi+1}] Diger port handshake tamamlayamadi, iptal")
                 return False
 
         # Chunk'lari gonder
@@ -326,14 +339,12 @@ class PortAlThread(QThread):
     sinyal_bitti    = pyqtSignal(int, bool)          # port_idx, basarili
 
     def __init__(self, port_idx: int, port_adi: str, baud: int,
-                 tek_port: bool = False,
-                 bariyer: Optional[threading.Barrier] = None):
+                 tek_port: bool = False):
         super().__init__()
         self.port_idx  = port_idx
         self.port_adi  = port_adi
         self.baud      = baud
         self.tek_port  = tek_port
-        self.bariyer   = bariyer
         self.basarili  = False
         self._dur      = False
         self._benim_toplam = 0
@@ -410,14 +421,6 @@ class PortAlThread(QThread):
             self._benim_toplam = (toplam_chunk + (1 - pi)) // 2
 
         ser.write(paket_olustur(PKT_ACK, 0))
-
-        # Senkronizasyon bariyeri: diger port da handshake tamamlayana kadar bekle
-        if self.bariyer is not None:
-            try:
-                self.bariyer.wait(timeout=90)
-            except threading.BrokenBarrierError:
-                self.sinyal_log.emit(f"[Port{pi+1}] Senkronizasyon basarisiz")
-                return False
 
         # Chunklari al
         alinan = 0
@@ -566,9 +569,8 @@ class AlYoneticisi(QThread):
             t0.wait()
             ok = t0.basarili
         else:
-            bariyer = threading.Barrier(2)
-            t0 = PortAlThread(0, self.port1, self.baud1, bariyer=bariyer)
-            t1 = PortAlThread(1, self.port2, self.baud2, bariyer=bariyer)
+            t0 = PortAlThread(0, self.port1, self.baud1)
+            t1 = PortAlThread(1, self.port2, self.baud2)
             for t in (t0, t1):
                 t.sinyal_log.connect(self.sinyal_log)
                 t.sinyal_ilerleme.connect(self.sinyal_port)

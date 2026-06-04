@@ -338,11 +338,10 @@ class EntegrasyonTestleri(unittest.TestCase):
                 alinan[seq] = veri
 
         bariyer_g = threading.Barrier(2)
-        bariyer_a = threading.Barrier(2)
         gt0 = SahteGonderThread(0, '', 0, c0, toplam, n, sahte_ser=g0, bariyer=bariyer_g)
         gt1 = SahteGonderThread(1, '', 0, c1, toplam, n, sahte_ser=g1, bariyer=bariyer_g)
-        at0 = SahteAlThread(0, '', 0, sahte_ser=a0, bariyer=bariyer_a)
-        at1 = SahteAlThread(1, '', 0, sahte_ser=a1, bariyer=bariyer_a)
+        at0 = SahteAlThread(0, '', 0, sahte_ser=a0)
+        at1 = SahteAlThread(1, '', 0, sahte_ser=a1)
 
         # DirectConnection: sinyali dogrudan emitting thread'de isle
         at0.sinyal_chunk.connect(chunk_topla, Qt.DirectConnection)
@@ -487,8 +486,8 @@ class SahtePortGecikmeli(SahtePort):
 
 class SahteAlThreadGecikmeli(SahteAlThread):
     """Ilk READY paketini atmadan once bekler."""
-    def __init__(self, *args, gecikme: float = 0.0, bariyer=None, **kwargs):
-        super().__init__(*args, bariyer=bariyer, **kwargs)
+    def __init__(self, *args, gecikme: float = 0.0, **kwargs):
+        super().__init__(*args, **kwargs)
         self._gecikme = gecikme
 
     def run(self):
@@ -528,11 +527,10 @@ class DayaniklilikTestleri(unittest.TestCase):
                 alinan[seq] = veri
 
         bariyer_g = threading.Barrier(2)
-        bariyer_a = threading.Barrier(2)
         gt0 = SahteGonderThread(0, '', 0, c0, toplam, n, sahte_ser=g0, bariyer=bariyer_g)
         gt1 = SahteGonderThread(1, '', 0, c1, toplam, n, sahte_ser=g1, bariyer=bariyer_g)
-        at0 = SahteAlThreadGecikmeli(0, '', 0, sahte_ser=a0, gecikme=gecikme_sn, bariyer=bariyer_a)
-        at1 = SahteAlThreadGecikmeli(1, '', 0, sahte_ser=a1, gecikme=gecikme_sn, bariyer=bariyer_a)
+        at0 = SahteAlThreadGecikmeli(0, '', 0, sahte_ser=a0, gecikme=gecikme_sn)
+        at1 = SahteAlThreadGecikmeli(1, '', 0, sahte_ser=a1, gecikme=gecikme_sn)
 
         at0.sinyal_chunk.connect(chunk_topla, Qt.DirectConnection)
         at1.sinyal_chunk.connect(chunk_topla, Qt.DirectConnection)
@@ -590,11 +588,10 @@ class DayaniklilikTestleri(unittest.TestCase):
                 alinan[seq] = veri
 
         bariyer_g = threading.Barrier(2)
-        bariyer_a = threading.Barrier(2)
         gt0 = SahteGonderThread(0, '', 0, c0, toplam, n, sahte_ser=g0, bariyer=bariyer_g)
         gt1 = SahteGonderThread(1, '', 0, c1, toplam, n, sahte_ser=g1, bariyer=bariyer_g)
-        at0 = SahteAlThread(0, '', 0, sahte_ser=a0, bariyer=bariyer_a)
-        at1 = SahteAlThread(1, '', 0, sahte_ser=a1, bariyer=bariyer_a)
+        at0 = SahteAlThread(0, '', 0, sahte_ser=a0)
+        at1 = SahteAlThread(1, '', 0, sahte_ser=a1)
 
         at0.sinyal_chunk.connect(chunk_topla, Qt.DirectConnection)
         at1.sinyal_chunk.connect(chunk_topla, Qt.DirectConnection)
