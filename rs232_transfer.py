@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-RS232 Cift COM Port Paralel Dosya Transfer Uygulamasi
+RS232 Serial Link Terminal
 Gereksinimler: pip install pyqt5 pyserial pyzipper
 """
 
@@ -43,21 +43,20 @@ from PyQt5.QtGui import QFont, QPalette, QColor
 
 MAGIC = b'\xAA\x55\xA5\x5A'
 
-PKT_READY = 0x01   # Alici hazir
-PKT_INFO  = 0x02   # Transfer bilgisi: total_chunks(4) + zip_size(8)
-PKT_DATA  = 0x03   # Veri chunk'i, seq = chunk indisi
-PKT_EOF   = 0x04   # Port transferi bitti
-PKT_ACK   = 0x05   # Onay, seq = onaylanan chunk indisi
-PKT_NAK   = 0x06   # Hata, seq = hata chunk indisi
-PKT_ABORT = 0x07   # Transfer iptal
+PKT_READY = 0x01
+PKT_INFO  = 0x02
+PKT_DATA  = 0x03
+PKT_EOF   = 0x04
+PKT_ACK   = 0x05
+PKT_NAK   = 0x06
+PKT_ABORT = 0x07
 
-# Paket yapisi: MAGIC(4) + TIP(1) + SEQ(4) + UZUNLUK(2) + VERI + CRC32(4)
 HDR_FMT  = '>4sBIH'
 HDR_SIZE = struct.calcsize(HDR_FMT)   # 4+1+4+2 = 11
 
 MAX_DENEME   = 5
-ACK_BEKLEME  = 8.0    # saniye
-HAZIR_BEKLEME = 60.0  # saniye
+ACK_BEKLEME  = 8.0
+HAZIR_BEKLEME = 60.0
 VARSAYILAN_CHUNK = 512
 
 
@@ -78,7 +77,7 @@ def paket_oku(ser: serial.Serial, bekleme: float = 10.0) -> Tuple[int, int, byte
 
     while True:
         if time.monotonic() > bitis:
-            raise TimeoutError(f"Paket okuma zaman asimi ({bekleme:.0f}s)")
+            raise TimeoutError(f"Packet read timeout ({bekleme:.0f}s)")
 
         bekleyen = ser.in_waiting
         if bekleyen > 0:
@@ -117,7 +116,7 @@ def paket_oku(ser: serial.Serial, bekleme: float = 10.0) -> Tuple[int, int, byte
                 del buf[:toplam]
                 return tip, seq, veri
             else:
-                del buf[:4]  # bozuk magic'i atla
+                del buf[:4]
 
         time.sleep(0.001)
 
@@ -127,7 +126,6 @@ def paket_oku(ser: serial.Serial, bekleme: float = 10.0) -> Tuple[int, int, byte
 # ==============================================================================
 
 def zip_olustur(ogeler: List[str], sifre: str) -> bytes:
-    """Dosya ve dizinleri AES-256 sifreli zip'e pakitle."""
     buf = io.BytesIO()
     with pyzipper.AESZipFile(buf, 'w',
                               compression=pyzipper.ZIP_DEFLATED,
@@ -145,7 +143,6 @@ def zip_olustur(ogeler: List[str], sifre: str) -> bytes:
 
 
 def zip_ac(veri: bytes, sifre: str, hedef: str) -> None:
-    """AES-256 sifreli zip'i hedef dizine cikar."""
     buf = io.BytesIO(veri)
     with pyzipper.AESZipFile(buf, 'r') as zf:
         zf.setpassword(sifre.encode('utf-8'))
@@ -157,9 +154,9 @@ def zip_ac(veri: bytes, sifre: str, hedef: str) -> None:
 # ==============================================================================
 
 class PortGonderThread(QThread):
-    sinyal_ilerleme = pyqtSignal(int, int)   # port_idx, 0-100
+    sinyal_ilerleme = pyqtSignal(int, int)
     sinyal_log      = pyqtSignal(str)
-    sinyal_bitti    = pyqtSignal(int, bool)  # port_idx, basarili
+    sinyal_bitti    = pyqtSignal(int, bool)
 
     def __init__(self, port_idx: int, port_adi: str, baud: int,
                  benim_chunklar: List[Tuple[int, bytes]],
@@ -192,14 +189,14 @@ class PortGonderThread(QThread):
             )
             ser.reset_output_buffer()
         except serial.SerialException as e:
-            self.sinyal_log.emit(f"[Port{pi+1}] Acılamadı: {e}")
+            self.sinyal_log.emit(f"[COM{pi+1}] Open failed: {e}")
             self.sinyal_bitti.emit(pi, False)
             return
 
         try:
             self.basarili = self._gonder(ser)
         except Exception as e:
-            self.sinyal_log.emit(f"[Port{pi+1}] Beklenmedik hata: {e}")
+            self.sinyal_log.emit(f"[COM{pi+1}] Unexpected error: {e}")
             self.basarili = False
         finally:
             ser.close()
@@ -207,7 +204,6 @@ class PortGonderThread(QThread):
         self.sinyal_bitti.emit(pi, self.basarili)
 
     def _abort_bariyer(self):
-        """Handshake basarisiz olursa bariyeri iptal et; bekleyen diger port aninda hata alsin."""
         if self.bariyer is not None:
             try:
                 self.bariyer.abort()
@@ -216,10 +212,8 @@ class PortGonderThread(QThread):
 
     def _gonder(self, ser: serial.Serial) -> bool:
         pi = self.port_idx
-        self.sinyal_log.emit(f"[Port{pi+1}] Alici bekleniyor...")
+        self.sinyal_log.emit(f"[COM{pi+1}] Waiting for remote...")
 
-        # READY bekle — yanlış tipli paket veya timeout gelirse yoksay,
-        # deadline dolana kadar tekrar dene (continue, break degil)
         bitis = time.monotonic() + HAZIR_BEKLEME
         hazir = False
         while time.monotonic() < bitis:
@@ -230,21 +224,19 @@ class PortGonderThread(QThread):
                     hazir = True
                     break
                 if tip == PKT_ABORT:
-                    self.sinyal_log.emit(f"[Port{pi+1}] ABORT alindi")
+                    self.sinyal_log.emit(f"[COM{pi+1}] ABORT received")
                     self._abort_bariyer()
                     return False
-                self.sinyal_log.emit(f"[Port{pi+1}] READY bekleniyor, gelen tip: {tip:#x} (yoksayildi)")
+                self.sinyal_log.emit(f"[COM{pi+1}] Awaiting READY, got type: {tip:#x} (ignored)")
             except TimeoutError:
-                continue  # Süre varsa döngüye devam et
+                continue
         if not hazir:
-            self.sinyal_log.emit(f"[Port{pi+1}] Alici READY gondermedi (zaman asimi)")
+            self.sinyal_log.emit(f"[COM{pi+1}] Remote READY timeout")
             self._abort_bariyer()
             return False
 
-        self.sinyal_log.emit(f"[Port{pi+1}] Alici hazir — INFO gonderiliyor...")
+        self.sinyal_log.emit(f"[COM{pi+1}] Remote ready — sending INFO...")
 
-        # INFO paketi gonder, ACK bekle
-        # Not: alici periyodik READY gonderiyor olabilir, bunlari yoksay
         info_veri = struct.pack('>IQ', self.toplam_chunk, self.zip_boyutu)
         for deneme in range(MAX_DENEME):
             ser.write(paket_olustur(PKT_INFO, 0, info_veri))
@@ -258,43 +250,37 @@ class PortGonderThread(QThread):
                         ack_alindi = True
                         break
                     if tip == PKT_ABORT:
-                        self.sinyal_log.emit(f"[Port{pi+1}] ABORT alindi")
+                        self.sinyal_log.emit(f"[COM{pi+1}] ABORT received")
                         self._abort_bariyer()
                         return False
-                    # READY veya baska tip: yoksay, ACK beklemeye devam
                 except TimeoutError:
                     break
             if ack_alindi:
                 break
-            self.sinyal_log.emit(f"[Port{pi+1}] INFO ACK bekleniyor ({deneme+1}/{MAX_DENEME})...")
+            self.sinyal_log.emit(f"[COM{pi+1}] INFO ACK wait ({deneme+1}/{MAX_DENEME})...")
         else:
-            self.sinyal_log.emit(f"[Port{pi+1}] INFO ACK alinamadi, iptal")
+            self.sinyal_log.emit(f"[COM{pi+1}] INFO ACK failed, aborting")
             self._abort_bariyer()
             return False
 
-        # Senkronizasyon bariyeri: diger port da handshake tamamlayana kadar bekle.
-        # Boylece her iki port chunk gondermeye ayni anda baslar; bant genisligi adil paylasilir.
-        # Herhangi bir port handshake'te basarisiz olursa abort() ile bariyer hemen kiriliyor.
         if self.bariyer is not None:
-            self.sinyal_log.emit(f"[Port{pi+1}] Diger port hazir olana kadar bekleniyor...")
+            self.sinyal_log.emit(f"[COM{pi+1}] Waiting for peer sync...")
             try:
                 self.bariyer.wait(timeout=HAZIR_BEKLEME)
-                self.sinyal_log.emit(f"[Port{pi+1}] Senkronizasyon tamam — transfer basliyor")
+                self.sinyal_log.emit(f"[COM{pi+1}] Sync OK — starting TX")
             except threading.BrokenBarrierError:
-                self.sinyal_log.emit(f"[Port{pi+1}] Diger port handshake tamamlayamadi, iptal")
+                self.sinyal_log.emit(f"[COM{pi+1}] Peer sync failed, aborting")
                 return False
 
-        # Chunk'lari gonder
         toplam = len(self.benim_chunklar)
         for i, (seq, veri) in enumerate(self.benim_chunklar):
             if self._dur:
                 ser.write(paket_olustur(PKT_ABORT, 0))
-                self.sinyal_log.emit(f"[Port{pi+1}] Transfer iptal edildi")
+                self.sinyal_log.emit(f"[COM{pi+1}] Aborted by user")
                 return False
 
             for deneme in range(MAX_DENEME):
                 ser.write(paket_olustur(PKT_DATA, seq, veri))
-                # ACK bekleme: dogru seq ACK gelene kadar veya timeout
                 bitis_ack = time.monotonic() + ACK_BEKLEME
                 ack_alindi = False
                 while time.monotonic() < bitis_ack:
@@ -305,25 +291,24 @@ class PortGonderThread(QThread):
                             ack_alindi = True
                             break
                         if tip == PKT_ABORT:
-                            self.sinyal_log.emit(f"[Port{pi+1}] Alici ABORT gonderdi")
+                            self.sinyal_log.emit(f"[COM{pi+1}] Remote sent ABORT")
                             return False
-                        # Farkli seq ACK veya baska paket — yoksay, devam et
                     except TimeoutError:
                         break
                 if ack_alindi:
                     break
                 self.sinyal_log.emit(
-                    f"[Port{pi+1}] Chunk {seq} tekrar gonderiliyor ({deneme+1}/{MAX_DENEME})..."
+                    f"[COM{pi+1}] Retrying packet {seq} ({deneme+1}/{MAX_DENEME})..."
                 )
             else:
-                self.sinyal_log.emit(f"[Port{pi+1}] Chunk {seq} gonderilemedi, iptal")
+                self.sinyal_log.emit(f"[COM{pi+1}] Packet {seq} failed, aborting")
                 return False
 
             pct = int((i + 1) * 100 / toplam)
             self.sinyal_ilerleme.emit(pi, pct)
 
         ser.write(paket_olustur(PKT_EOF, 0))
-        self.sinyal_log.emit(f"[Port{pi+1}] Tum chunklar gonderildi ({toplam} adet)")
+        self.sinyal_log.emit(f"[COM{pi+1}] All packets sent ({toplam})")
         return True
 
 
@@ -332,11 +317,11 @@ class PortGonderThread(QThread):
 # ==============================================================================
 
 class PortAlThread(QThread):
-    sinyal_ilerleme = pyqtSignal(int, int)          # port_idx, 0-100
+    sinyal_ilerleme = pyqtSignal(int, int)
     sinyal_log      = pyqtSignal(str)
-    sinyal_chunk    = pyqtSignal(int, int, bytes)    # port_idx, seq, veri
-    sinyal_info     = pyqtSignal(int, int, int)      # port_idx, toplam_chunk, zip_boyutu
-    sinyal_bitti    = pyqtSignal(int, bool)          # port_idx, basarili
+    sinyal_chunk    = pyqtSignal(int, int, bytes)
+    sinyal_info     = pyqtSignal(int, int, int)
+    sinyal_bitti    = pyqtSignal(int, bool)
 
     def __init__(self, port_idx: int, port_adi: str, baud: int,
                  tek_port: bool = False):
@@ -365,14 +350,14 @@ class PortAlThread(QThread):
             )
             ser.reset_output_buffer()
         except serial.SerialException as e:
-            self.sinyal_log.emit(f"[Port{pi+1}] Acılamadı: {e}")
+            self.sinyal_log.emit(f"[COM{pi+1}] Open failed: {e}")
             self.sinyal_bitti.emit(pi, False)
             return
 
         try:
             self.basarili = self._al(ser)
         except Exception as e:
-            self.sinyal_log.emit(f"[Port{pi+1}] Beklenmedik hata: {e}")
+            self.sinyal_log.emit(f"[COM{pi+1}] Unexpected error: {e}")
             self.basarili = False
         finally:
             ser.close()
@@ -382,10 +367,7 @@ class PortAlThread(QThread):
     def _al(self, ser: serial.Serial) -> bool:
         pi = self.port_idx
 
-        # INFO gelene kadar periyodik READY gonder (her ~2s'de bir tekrarla).
-        # Boylece gonderici ne zaman baslarsa baslasin READY'yi yakalar,
-        # port acilindan sonra karsinin gonderdiği READY kaybolsa bile sorun olmaz.
-        self.sinyal_log.emit(f"[Port{pi+1}] Gonderici bekleniyor (READY gonderiliyor)...")
+        self.sinyal_log.emit(f"[COM{pi+1}] Awaiting sender (sending READY)...")
         bitis = time.monotonic() + HAZIR_BEKLEME
         info_veri = None
         while time.monotonic() < bitis:
@@ -397,45 +379,42 @@ class PortAlThread(QThread):
                     info_veri = veri
                     break
                 if tip == PKT_ABORT:
-                    self.sinyal_log.emit(f"[Port{pi+1}] ABORT alindi")
+                    self.sinyal_log.emit(f"[COM{pi+1}] ABORT received")
                     return False
-                self.sinyal_log.emit(f"[Port{pi+1}] INFO bekleniyor, gelen tip: {tip:#x} (yoksayildi)")
+                self.sinyal_log.emit(f"[COM{pi+1}] Awaiting INFO, got type: {tip:#x} (ignored)")
             except TimeoutError:
-                continue  # Tekrar READY gonder
+                continue
         if info_veri is None:
-            self.sinyal_log.emit(f"[Port{pi+1}] INFO paketi alinamadi (zaman asimi)")
+            self.sinyal_log.emit(f"[COM{pi+1}] INFO packet timeout")
             return False
         veri = info_veri
 
         toplam_chunk, zip_boyutu = struct.unpack('>IQ', veri[:12])
         self.sinyal_log.emit(
-            f"[Port{pi+1}] INFO: {toplam_chunk} chunk, {zip_boyutu:,} byte"
+            f"[COM{pi+1}] Link info: {toplam_chunk} packets, {zip_boyutu:,} bytes"
         )
         self.sinyal_info.emit(pi, toplam_chunk, zip_boyutu)
 
         if self.tek_port:
             self._benim_toplam = toplam_chunk
         else:
-            # port0 = cift indisler (0,2,4,...) → ceil(toplam/2)
-            # port1 = tek indisler (1,3,5,...) → floor(toplam/2)
             self._benim_toplam = (toplam_chunk + (1 - pi)) // 2
 
         ser.write(paket_olustur(PKT_ACK, 0))
 
-        # Chunklari al
         alinan = 0
         while not self._dur:
             try:
                 tip, seq, veri = paket_oku(ser, 60.0)
             except TimeoutError as e:
-                self.sinyal_log.emit(f"[Port{pi+1}] {e}")
+                self.sinyal_log.emit(f"[COM{pi+1}] {e}")
                 return False
 
             if tip == PKT_EOF:
-                self.sinyal_log.emit(f"[Port{pi+1}] EOF — {alinan} chunk alindi")
+                self.sinyal_log.emit(f"[COM{pi+1}] EOF — {alinan} packets received")
                 break
             elif tip == PKT_ABORT:
-                self.sinyal_log.emit(f"[Port{pi+1}] Transfer iptal edildi")
+                self.sinyal_log.emit(f"[COM{pi+1}] Aborted by remote")
                 return False
             elif tip == PKT_DATA:
                 ser.write(paket_olustur(PKT_ACK, seq))
@@ -455,8 +434,8 @@ class PortAlThread(QThread):
 # ==============================================================================
 
 class GonderYoneticisi(QThread):
-    sinyal_genel    = pyqtSignal(int)        # 0-100
-    sinyal_port     = pyqtSignal(int, int)   # port_idx, 0-100
+    sinyal_genel    = pyqtSignal(int)
+    sinyal_port     = pyqtSignal(int, int)
     sinyal_log      = pyqtSignal(str)
     sinyal_bitti    = pyqtSignal(bool, str)
 
@@ -475,19 +454,23 @@ class GonderYoneticisi(QThread):
         self.tek_port    = tek_port
         self._yuzde      = [0, 0]
         self._kilit      = threading.Lock()
+        self._threadler: List[PortGonderThread] = []
+
+    def dur(self):
+        for t in self._threadler:
+            t.dur()
 
     def run(self):
-        self.sinyal_log.emit("Sifreli ZIP olusturuluyor...")
+        self.sinyal_log.emit("Compressing payload...")
         try:
             zip_verisi = zip_olustur(self.ogeler, self.sifre)
         except Exception as e:
-            self.sinyal_bitti.emit(False, f"ZIP hatasi: {e}")
+            self.sinyal_bitti.emit(False, f"Compression error: {e}")
             return
 
         n = len(zip_verisi)
-        self.sinyal_log.emit(f"ZIP hazir: {n:,} byte")
+        self.sinyal_log.emit(f"Payload ready: {n:,} bytes")
 
-        # Chunk'lara bol
         tum_chunklar: List[Tuple[int, bytes]] = []
         for i, offset in enumerate(range(0, n, self.chunk_boyutu)):
             tum_chunklar.append((i, zip_verisi[offset:offset + self.chunk_boyutu]))
@@ -495,10 +478,11 @@ class GonderYoneticisi(QThread):
         toplam = len(tum_chunklar)
 
         if self.tek_port:
-            self.sinyal_log.emit(f"Toplam {toplam} chunk → Port1: {toplam} (tek port modu)")
+            self.sinyal_log.emit(f"Framing {toplam} packets → COM1: {toplam} [single]")
             t0 = PortGonderThread(0, self.port1, self.baud1, tum_chunklar, toplam, n)
             t0.sinyal_ilerleme.connect(self._ilerleme_guncelle)
             t0.sinyal_log.connect(self.sinyal_log)
+            self._threadler = [t0]
             t0.start()
             t0.wait()
             ok = t0.basarili
@@ -506,11 +490,12 @@ class GonderYoneticisi(QThread):
             c0 = [(s, d) for s, d in tum_chunklar if s % 2 == 0]
             c1 = [(s, d) for s, d in tum_chunklar if s % 2 == 1]
             self.sinyal_log.emit(
-                f"Toplam {toplam} chunk → Port1: {len(c0)}, Port2: {len(c1)}"
+                f"Framing {toplam} packets → COM1: {len(c0)}, COM2: {len(c1)}"
             )
             bariyer = threading.Barrier(2)
             t0 = PortGonderThread(0, self.port1, self.baud1, c0, toplam, n, bariyer=bariyer)
             t1 = PortGonderThread(1, self.port2, self.baud2, c1, toplam, n, bariyer=bariyer)
+            self._threadler = [t0, t1]
             for t in (t0, t1):
                 t.sinyal_ilerleme.connect(self._ilerleme_guncelle)
                 t.sinyal_log.connect(self.sinyal_log)
@@ -520,7 +505,7 @@ class GonderYoneticisi(QThread):
             t1.wait()
             ok = t0.basarili and t1.basarili
 
-        msg = "Transfer basariyla tamamlandi!" if ok else "Transfer basarisiz oldu."
+        msg = "Transmission complete." if ok else "Transmission failed."
         self.sinyal_bitti.emit(ok, msg)
 
     def _ilerleme_guncelle(self, pi: int, pct: int):
@@ -557,6 +542,11 @@ class AlYoneticisi(QThread):
         self._chunklar: Dict[int, bytes] = {}
         self._toplam     = 0
         self._kilit      = threading.Lock()
+        self._threadler: List[PortAlThread] = []
+
+    def dur(self):
+        for t in self._threadler:
+            t.dur()
 
     def run(self):
         if self.tek_port:
@@ -565,12 +555,14 @@ class AlYoneticisi(QThread):
             t0.sinyal_ilerleme.connect(self.sinyal_port)
             t0.sinyal_chunk.connect(self._chunk_alindi)
             t0.sinyal_info.connect(self._info_alindi)
+            self._threadler = [t0]
             t0.start()
             t0.wait()
             ok = t0.basarili
         else:
             t0 = PortAlThread(0, self.port1, self.baud1)
             t1 = PortAlThread(1, self.port2, self.baud2)
+            self._threadler = [t0, t1]
             for t in (t0, t1):
                 t.sinyal_log.connect(self.sinyal_log)
                 t.sinyal_ilerleme.connect(self.sinyal_port)
@@ -583,27 +575,27 @@ class AlYoneticisi(QThread):
             ok = t0.basarili and t1.basarili
 
         if not ok:
-            self.sinyal_bitti.emit(False, "Alim basarisiz oldu.")
+            self.sinyal_bitti.emit(False, "Reception failed.")
             return
 
-        self.sinyal_log.emit(f"Chunklar birlestiriliyor ({len(self._chunklar)} adet)...")
+        self.sinyal_log.emit(f"Reassembling {len(self._chunklar)} packets...")
         try:
             zip_verisi = b''.join(
                 self._chunklar[i] for i in sorted(self._chunklar)
             )
         except KeyError as e:
-            self.sinyal_bitti.emit(False, f"Eksik chunk: {e}")
+            self.sinyal_bitti.emit(False, f"Missing packet: {e}")
             return
 
-        self.sinyal_log.emit(f"ZIP aciliyor ({len(zip_verisi):,} byte) → {self.hedef_dizin}")
+        self.sinyal_log.emit(f"Extracting payload ({len(zip_verisi):,} bytes) → {self.hedef_dizin}")
         try:
             os.makedirs(self.hedef_dizin, exist_ok=True)
             zip_ac(zip_verisi, self.sifre, self.hedef_dizin)
             self.sinyal_bitti.emit(
-                True, f"Dosyalar '{self.hedef_dizin}' klasorune cikarildi."
+                True, f"Output written to '{self.hedef_dizin}'."
             )
         except Exception as e:
-            self.sinyal_bitti.emit(False, f"ZIP acma hatasi: {e}")
+            self.sinyal_bitti.emit(False, f"Extraction error: {e}")
 
     def _chunk_alindi(self, pi: int, seq: int, veri: bytes):
         with self._kilit:
@@ -617,7 +609,7 @@ class AlYoneticisi(QThread):
             if not self._toplam:
                 self._toplam = toplam
                 self.sinyal_log.emit(
-                    f"Transfer bilgisi: {toplam} chunk, {zip_boyutu:,} byte"
+                    f"Link info: {toplam} packets, {zip_boyutu:,} bytes"
                 )
 
 
@@ -647,7 +639,7 @@ class PortSeciciWidget(QGroupBox):
 
         yenile_btn = QPushButton("↻")
         yenile_btn.setFixedWidth(28)
-        yenile_btn.setToolTip("Portlari Yenile")
+        yenile_btn.setToolTip("Refresh ports")
         yenile_btn.clicked.connect(self.yenile)
         duzen.addWidget(yenile_btn)
 
@@ -698,6 +690,7 @@ def ilerleme_satiri_olustur(etiket: str, ana_duzen: QVBoxLayout) -> QProgressBar
     satir = QHBoxLayout()
     lbl = QLabel(etiket)
     lbl.setFixedWidth(75)
+    lbl.setFont(QFont('Courier New', 9))
     bar = QProgressBar()
     bar.setRange(0, 100)
     bar.setValue(0)
@@ -709,7 +702,7 @@ def ilerleme_satiri_olustur(etiket: str, ana_duzen: QVBoxLayout) -> QProgressBar
 
 
 # ==============================================================================
-# GONDER SEKMESI
+# TX SEKMESI
 # ==============================================================================
 
 class GonderSekmesi(QWidget):
@@ -722,21 +715,22 @@ class GonderSekmesi(QWidget):
         ana = QVBoxLayout(self)
         ana.setSpacing(8)
 
-        # --- Dosya listesi ---
-        dosya_grup = QGroupBox("Gonderilecek Dosya / Dizinler")
+        # --- Source payload ---
+        dosya_grup = QGroupBox("Source Payload")
         dg = QVBoxLayout(dosya_grup)
 
         self.dosya_listesi = QListWidget()
         self.dosya_listesi.setMinimumHeight(110)
         self.dosya_listesi.setAlternatingRowColors(True)
+        self.dosya_listesi.setFont(QFont('Courier New', 9))
         dg.addWidget(self.dosya_listesi)
 
         btn_satir = QHBoxLayout()
         for metin, slot in [
-            ("+ Dosya Ekle", self._dosya_ekle),
-            ("+ Dizin Ekle", self._dizin_ekle),
-            ("Secileni Kaldir", self._kaldir),
-            ("Listeyi Temizle", self.dosya_listesi.clear),
+            ("+ File", self._dosya_ekle),
+            ("+ Dir",  self._dizin_ekle),
+            ("Remove", self._kaldir),
+            ("Clear",  self.dosya_listesi.clear),
         ]:
             b = QPushButton(metin)
             b.clicked.connect(slot)
@@ -744,32 +738,33 @@ class GonderSekmesi(QWidget):
         dg.addLayout(btn_satir)
         ana.addWidget(dosya_grup)
 
-        # --- Port modu ---
+        # --- Port mode ---
         mod_satir = QHBoxLayout()
-        self.tek_port_cb = QCheckBox("Tek Port Modu (sadece Port 1 kullanilir)")
+        self.tek_port_cb = QCheckBox("Single Port  [COM1 only]")
         self.tek_port_cb.toggled.connect(self._tek_port_guncelle)
         mod_satir.addWidget(self.tek_port_cb)
         mod_satir.addStretch()
         ana.addLayout(mod_satir)
 
-        # --- Port ayarlari ---
+        # --- Port settings ---
         port_satir = QHBoxLayout()
-        self.port1 = PortSeciciWidget("Port 1 (Cift indisler: 0, 2, 4...)")
-        self.port2 = PortSeciciWidget("Port 2 (Tek indisler: 1, 3, 5...)")
+        self.port1 = PortSeciciWidget("COM1  [even: 0,2,4...]")
+        self.port2 = PortSeciciWidget("COM2  [odd: 1,3,5...]")
         port_satir.addWidget(self.port1)
         port_satir.addWidget(self.port2)
         ana.addLayout(port_satir)
 
-        # --- Sifre + chunk boyutu ---
+        # --- Key + packet size ---
         opt_satir = QHBoxLayout()
 
-        sifre_grup = QGroupBox("Sifre")
+        sifre_grup = QGroupBox("Encryption Key")
         sg = QHBoxLayout(sifre_grup)
         self.sifre_giris = QLineEdit()
         self.sifre_giris.setEchoMode(QLineEdit.Password)
-        self.sifre_giris.setPlaceholderText("ZIP sifresi...")
+        self.sifre_giris.setPlaceholderText("key...")
+        self.sifre_giris.setFont(QFont('Courier New', 9))
         sg.addWidget(self.sifre_giris)
-        self.sifre_goster = QCheckBox("Goster")
+        self.sifre_goster = QCheckBox("Show")
         self.sifre_goster.toggled.connect(
             lambda c: self.sifre_giris.setEchoMode(
                 QLineEdit.Normal if c else QLineEdit.Password
@@ -778,7 +773,7 @@ class GonderSekmesi(QWidget):
         sg.addWidget(self.sifre_goster)
         opt_satir.addWidget(sifre_grup, 3)
 
-        chunk_grup = QGroupBox("Chunk Boyutu")
+        chunk_grup = QGroupBox("Packet Size")
         cg = QHBoxLayout(chunk_grup)
         self.chunk_combo = QComboBox()
         for c in CHUNK_BOYUTLARI:
@@ -789,30 +784,37 @@ class GonderSekmesi(QWidget):
 
         ana.addLayout(opt_satir)
 
-        # --- Ilerleme cubuklar ---
-        ilerleme_grup = QGroupBox("Ilerleme")
+        # --- Progress bars ---
+        ilerleme_grup = QGroupBox("Link Status")
         ig = QVBoxLayout(ilerleme_grup)
-        self.bar_port1   = ilerleme_satiri_olustur("Port 1:", ig)
-        self.bar_port2   = ilerleme_satiri_olustur("Port 2:", ig)
-        self.bar_genel   = ilerleme_satiri_olustur("Toplam: ", ig)
+        self.bar_port1 = ilerleme_satiri_olustur("COM1:", ig)
+        self.bar_port2 = ilerleme_satiri_olustur("COM2:", ig)
+        self.bar_genel = ilerleme_satiri_olustur("Total:", ig)
         ana.addWidget(ilerleme_grup)
 
-        # --- Log ---
-        log_grup = QGroupBox("Islem Gunlugu")
+        # --- Console output ---
+        log_grup = QGroupBox("Console Output")
         lg = QVBoxLayout(log_grup)
         self.log = LogAlani()
         lg.addWidget(self.log)
         ana.addWidget(log_grup)
 
-        # --- Gonder butonu ---
-        self.btn_gonder = QPushButton("GONDER")
-
+        # --- Action buttons ---
+        btn_satir2 = QHBoxLayout()
+        self.btn_gonder = QPushButton("TRANSMIT")
         self.btn_gonder.setFixedHeight(42)
-        self.btn_gonder.setFont(QFont('Arial', 12, QFont.Bold))
+        self.btn_gonder.setFont(QFont('Courier New', 11, QFont.Bold))
         self.btn_gonder.clicked.connect(self._gonderi_baslat)
-        ana.addWidget(self.btn_gonder)
+        btn_satir2.addWidget(self.btn_gonder)
 
-    # -- Yardimci metodlar --
+        self.btn_iptal = QPushButton("ABORT")
+        self.btn_iptal.setFixedHeight(42)
+        self.btn_iptal.setFixedWidth(110)
+        self.btn_iptal.setFont(QFont('Courier New', 11, QFont.Bold))
+        self.btn_iptal.setEnabled(False)
+        self.btn_iptal.clicked.connect(self._iptal)
+        btn_satir2.addWidget(self.btn_iptal)
+        ana.addLayout(btn_satir2)
 
     def _tek_port_guncelle(self, tek: bool):
         self.port2.setEnabled(not tek)
@@ -820,17 +822,17 @@ class GonderSekmesi(QWidget):
         if tek:
             self.bar_port2.setValue(0)
         self.port1.setTitle(
-            "Port 1" if tek else "Port 1 (Cift indisler: 0, 2, 4...)"
+            "COM1" if tek else "COM1  [even: 0,2,4...]"
         )
 
     def _dosya_ekle(self):
-        dosyalar, _ = QFileDialog.getOpenFileNames(self, "Dosya Sec")
+        dosyalar, _ = QFileDialog.getOpenFileNames(self, "Select Files")
         for d in dosyalar:
             if not self._listede_mi(d):
                 self.dosya_listesi.addItem(QListWidgetItem(d))
 
     def _dizin_ekle(self):
-        d = QFileDialog.getExistingDirectory(self, "Dizin Sec")
+        d = QFileDialog.getExistingDirectory(self, "Select Directory")
         if d and not self._listede_mi(d):
             self.dosya_listesi.addItem(QListWidgetItem(d))
 
@@ -853,32 +855,39 @@ class GonderSekmesi(QWidget):
     def _chunk_boyutu(self) -> int:
         return int(self.chunk_combo.currentText().replace(' B', ''))
 
+    def _iptal(self):
+        if self._yonetici and self._yonetici.isRunning():
+            self._yonetici.dur()
+            self.btn_iptal.setEnabled(False)
+            self.log.log_ekle("Abort requested...")
+
     def _gonderi_baslat(self):
         ogeler = self._ogeler()
         if not ogeler:
-            QMessageBox.warning(self, "Uyari", "Gonderilecek dosya/dizin secilmedi.")
+            QMessageBox.warning(self, "Warning", "No source payload selected.")
             return
 
         sifre = self.sifre_giris.text()
         if not sifre:
-            QMessageBox.warning(self, "Uyari", "Sifre girmediniz.")
+            QMessageBox.warning(self, "Warning", "Encryption key required.")
             return
 
         tek_port = self.tek_port_cb.isChecked()
         p1 = self.port1.port
         p2 = self.port2.port
         if not p1:
-            QMessageBox.warning(self, "Uyari", "Port 1 secilmedi.")
+            QMessageBox.warning(self, "Warning", "COM1 not selected.")
             return
         if not tek_port:
             if not p2:
-                QMessageBox.warning(self, "Uyari", "Port 2 secilmedi.")
+                QMessageBox.warning(self, "Warning", "COM2 not selected.")
                 return
             if p1 == p2:
-                QMessageBox.warning(self, "Uyari", "Iki port birbirinden farkli olmali.")
+                QMessageBox.warning(self, "Warning", "COM1 and COM2 must differ.")
                 return
 
         self.btn_gonder.setEnabled(False)
+        self.btn_iptal.setEnabled(True)
         for bar in (self.bar_port1, self.bar_port2, self.bar_genel):
             bar.setValue(0)
 
@@ -898,17 +907,18 @@ class GonderSekmesi(QWidget):
 
     def _tamamlandi(self, ok: bool, mesaj: str):
         self.btn_gonder.setEnabled(True)
+        self.btn_iptal.setEnabled(False)
         self.log.log_ekle(mesaj)
         if ok:
             for bar in (self.bar_port1, self.bar_port2, self.bar_genel):
                 bar.setValue(100)
-            QMessageBox.information(self, "Basarili", mesaj)
+            QMessageBox.information(self, "OK", mesaj)
         else:
-            QMessageBox.critical(self, "Hata", mesaj)
+            QMessageBox.critical(self, "Error", mesaj)
 
 
 # ==============================================================================
-# AL SEKMESI
+# RX SEKMESI
 # ==============================================================================
 
 class AlSekmesi(QWidget):
@@ -921,41 +931,43 @@ class AlSekmesi(QWidget):
         ana = QVBoxLayout(self)
         ana.setSpacing(8)
 
-        # --- Cikti dizini ---
-        cikti_grup = QGroupBox("Cikti Klasoru")
+        # --- Output path ---
+        cikti_grup = QGroupBox("Output Path")
         cg = QHBoxLayout(cikti_grup)
         self.cikti_giris = QLineEdit()
-        self.cikti_giris.setPlaceholderText("Dosyalarin kaydedilecegi klasor...")
+        self.cikti_giris.setPlaceholderText("output directory...")
+        self.cikti_giris.setFont(QFont('Courier New', 9))
         cg.addWidget(self.cikti_giris)
-        gozat_btn = QPushButton("Gozat...")
+        gozat_btn = QPushButton("Browse...")
         gozat_btn.clicked.connect(self._cikti_sec)
         cg.addWidget(gozat_btn)
         ana.addWidget(cikti_grup)
 
-        # --- Port modu ---
+        # --- Port mode ---
         mod_satir = QHBoxLayout()
-        self.tek_port_cb = QCheckBox("Tek Port Modu (sadece Port 1 kullanilir)")
+        self.tek_port_cb = QCheckBox("Single Port  [COM1 only]")
         self.tek_port_cb.toggled.connect(self._tek_port_guncelle)
         mod_satir.addWidget(self.tek_port_cb)
         mod_satir.addStretch()
         ana.addLayout(mod_satir)
 
-        # --- Port ayarlari ---
+        # --- Port settings ---
         port_satir = QHBoxLayout()
-        self.port1 = PortSeciciWidget("Port 1")
-        self.port2 = PortSeciciWidget("Port 2")
+        self.port1 = PortSeciciWidget("COM1")
+        self.port2 = PortSeciciWidget("COM2")
         port_satir.addWidget(self.port1)
         port_satir.addWidget(self.port2)
         ana.addLayout(port_satir)
 
-        # --- Sifre ---
-        sifre_grup = QGroupBox("Sifre (Gondericidekiyle ayni olmali)")
+        # --- Decryption key ---
+        sifre_grup = QGroupBox("Decryption Key")
         sg = QHBoxLayout(sifre_grup)
         self.sifre_giris = QLineEdit()
         self.sifre_giris.setEchoMode(QLineEdit.Password)
-        self.sifre_giris.setPlaceholderText("ZIP sifresi...")
+        self.sifre_giris.setPlaceholderText("key...")
+        self.sifre_giris.setFont(QFont('Courier New', 9))
         sg.addWidget(self.sifre_giris)
-        self.sifre_goster = QCheckBox("Goster")
+        self.sifre_goster = QCheckBox("Show")
         self.sifre_goster.toggled.connect(
             lambda c: self.sifre_giris.setEchoMode(
                 QLineEdit.Normal if c else QLineEdit.Password
@@ -964,27 +976,37 @@ class AlSekmesi(QWidget):
         sg.addWidget(self.sifre_goster)
         ana.addWidget(sifre_grup)
 
-        # --- Ilerleme ---
-        ilerleme_grup = QGroupBox("Ilerleme")
+        # --- Progress bars ---
+        ilerleme_grup = QGroupBox("Link Status")
         ig = QVBoxLayout(ilerleme_grup)
-        self.bar_port1   = ilerleme_satiri_olustur("Port 1:", ig)
-        self.bar_port2   = ilerleme_satiri_olustur("Port 2:", ig)
-        self.bar_genel   = ilerleme_satiri_olustur("Toplam: ", ig)
+        self.bar_port1 = ilerleme_satiri_olustur("COM1:", ig)
+        self.bar_port2 = ilerleme_satiri_olustur("COM2:", ig)
+        self.bar_genel = ilerleme_satiri_olustur("Total:", ig)
         ana.addWidget(ilerleme_grup)
 
-        # --- Log ---
-        log_grup = QGroupBox("Islem Gunlugu")
+        # --- Console output ---
+        log_grup = QGroupBox("Console Output")
         lg = QVBoxLayout(log_grup)
         self.log = LogAlani()
         lg.addWidget(self.log)
         ana.addWidget(log_grup)
 
-        # --- Al butonu ---
-        self.btn_al = QPushButton("AL")
+        # --- Action buttons ---
+        btn_satir = QHBoxLayout()
+        self.btn_al = QPushButton("RECEIVE")
         self.btn_al.setFixedHeight(42)
-        self.btn_al.setFont(QFont('Arial', 12, QFont.Bold))
+        self.btn_al.setFont(QFont('Courier New', 11, QFont.Bold))
         self.btn_al.clicked.connect(self._alimi_baslat)
-        ana.addWidget(self.btn_al)
+        btn_satir.addWidget(self.btn_al)
+
+        self.btn_iptal = QPushButton("ABORT")
+        self.btn_iptal.setFixedHeight(42)
+        self.btn_iptal.setFixedWidth(110)
+        self.btn_iptal.setFont(QFont('Courier New', 11, QFont.Bold))
+        self.btn_iptal.setEnabled(False)
+        self.btn_iptal.clicked.connect(self._iptal)
+        btn_satir.addWidget(self.btn_iptal)
+        ana.addLayout(btn_satir)
 
     def _tek_port_guncelle(self, tek: bool):
         self.port2.setEnabled(not tek)
@@ -993,36 +1015,43 @@ class AlSekmesi(QWidget):
             self.bar_port2.setValue(0)
 
     def _cikti_sec(self):
-        d = QFileDialog.getExistingDirectory(self, "Cikti Klasoru Sec")
+        d = QFileDialog.getExistingDirectory(self, "Select Output Directory")
         if d:
             self.cikti_giris.setText(d)
+
+    def _iptal(self):
+        if self._yonetici and self._yonetici.isRunning():
+            self._yonetici.dur()
+            self.btn_iptal.setEnabled(False)
+            self.log.log_ekle("Abort requested...")
 
     def _alimi_baslat(self):
         cikti = self.cikti_giris.text().strip()
         if not cikti:
-            QMessageBox.warning(self, "Uyari", "Cikti klasoru secilmedi.")
+            QMessageBox.warning(self, "Warning", "Output path not specified.")
             return
 
         sifre = self.sifre_giris.text()
         if not sifre:
-            QMessageBox.warning(self, "Uyari", "Sifre girmediniz.")
+            QMessageBox.warning(self, "Warning", "Decryption key required.")
             return
 
         tek_port = self.tek_port_cb.isChecked()
         p1 = self.port1.port
         p2 = self.port2.port
         if not p1:
-            QMessageBox.warning(self, "Uyari", "Port 1 secilmedi.")
+            QMessageBox.warning(self, "Warning", "COM1 not selected.")
             return
         if not tek_port:
             if not p2:
-                QMessageBox.warning(self, "Uyari", "Port 2 secilmedi.")
+                QMessageBox.warning(self, "Warning", "COM2 not selected.")
                 return
             if p1 == p2:
-                QMessageBox.warning(self, "Uyari", "Iki port birbirinden farkli olmali.")
+                QMessageBox.warning(self, "Warning", "COM1 and COM2 must differ.")
                 return
 
         self.btn_al.setEnabled(False)
+        self.btn_iptal.setEnabled(True)
         for bar in (self.bar_port1, self.bar_port2, self.bar_genel):
             bar.setValue(0)
 
@@ -1041,13 +1070,14 @@ class AlSekmesi(QWidget):
 
     def _tamamlandi(self, ok: bool, mesaj: str):
         self.btn_al.setEnabled(True)
+        self.btn_iptal.setEnabled(False)
         self.log.log_ekle(mesaj)
         if ok:
             for bar in (self.bar_port1, self.bar_port2, self.bar_genel):
                 bar.setValue(100)
-            QMessageBox.information(self, "Basarili", mesaj)
+            QMessageBox.information(self, "OK", mesaj)
         else:
-            QMessageBox.critical(self, "Hata", mesaj)
+            QMessageBox.critical(self, "Error", mesaj)
 
 
 # ==============================================================================
@@ -1057,7 +1087,7 @@ class AlSekmesi(QWidget):
 class AnaPencere(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RS232 Cift COM Port Paralel Dosya Transferi")
+        self.setWindowTitle("RS232 Serial Link Terminal")
         self.setMinimumSize(820, 680)
 
         merkez = QWidget()
@@ -1066,9 +1096,8 @@ class AnaPencere(QMainWindow):
         ana.setContentsMargins(10, 10, 10, 10)
         ana.setSpacing(8)
 
-        # Baslik
-        baslik = QLabel("RS232 Cift COM Port Paralel Dosya Transferi")
-        baslik.setFont(QFont('Arial', 13, QFont.Bold))
+        baslik = QLabel("RS232 Serial Link Terminal")
+        baslik.setFont(QFont('Courier New', 13, QFont.Bold))
         baslik.setAlignment(Qt.AlignCenter)
         ana.addWidget(baslik)
 
@@ -1077,65 +1106,69 @@ class AnaPencere(QMainWindow):
         ayrac.setFrameShadow(QFrame.Sunken)
         ana.addWidget(ayrac)
 
-        # Sekmeler
         sekmeler = QTabWidget()
-        sekmeler.addTab(GonderSekmesi(), "  Gonder  ")
-        sekmeler.addTab(AlSekmesi(), "  Al  ")
-        sekmeler.setFont(QFont('Arial', 10))
+        sekmeler.addTab(GonderSekmesi(), "  [ TX ]  ")
+        sekmeler.addTab(AlSekmesi(),     "  [ RX ]  ")
+        sekmeler.setFont(QFont('Courier New', 10))
         ana.addWidget(sekmeler)
 
         self.statusBar().showMessage(
-            "Hazir  |  Her iki tarafta da ayni baud hizini ve sifresini kullanin."
+            "IDLE  |  Ensure matching baud rate and key on both endpoints."
         )
 
 
 # ==============================================================================
-# KOYU TEMA
+# TEMA
 # ==============================================================================
 
 def koyu_tema_uygula(uygulama: QApplication):
     uygulama.setStyle('Fusion')
     palet = QPalette()
     renk = {
-        QPalette.Window:          QColor(45,  45,  48),
-        QPalette.WindowText:      QColor(220, 220, 220),
-        QPalette.Base:            QColor(30,  30,  30),
-        QPalette.AlternateBase:   QColor(45,  45,  48),
-        QPalette.ToolTipBase:     QColor(45,  45,  48),
-        QPalette.ToolTipText:     QColor(220, 220, 220),
-        QPalette.Text:            QColor(220, 220, 220),
-        QPalette.Button:          QColor(60,  60,  65),
-        QPalette.ButtonText:      QColor(220, 220, 220),
-        QPalette.BrightText:      QColor(255, 100, 100),
-        QPalette.Link:            QColor(42,  130, 218),
-        QPalette.Highlight:       QColor(42,  130, 218),
+        QPalette.Window:          QColor(18,  18,  18),
+        QPalette.WindowText:      QColor(180, 255, 180),
+        QPalette.Base:            QColor(10,  10,  10),
+        QPalette.AlternateBase:   QColor(22,  22,  22),
+        QPalette.ToolTipBase:     QColor(22,  22,  22),
+        QPalette.ToolTipText:     QColor(180, 255, 180),
+        QPalette.Text:            QColor(180, 255, 180),
+        QPalette.Button:          QColor(30,  30,  30),
+        QPalette.ButtonText:      QColor(180, 255, 180),
+        QPalette.BrightText:      QColor(255,  80,  80),
+        QPalette.Link:            QColor(0,   200, 100),
+        QPalette.Highlight:       QColor(0,   160,  80),
         QPalette.HighlightedText: QColor(0,   0,   0),
-        QPalette.Disabled + QPalette.Text:       QColor(120, 120, 120),
-        QPalette.Disabled + QPalette.ButtonText: QColor(120, 120, 120),
+        QPalette.Disabled + QPalette.Text:       QColor(80,  80,  80),
+        QPalette.Disabled + QPalette.ButtonText: QColor(80,  80,  80),
     }
     for rol, renk_degeri in renk.items():
         palet.setColor(rol, renk_degeri)
     uygulama.setPalette(palet)
 
-    # Progress bar rengi
     uygulama.setStyleSheet("""
         QProgressBar {
-            border: 1px solid #555;
-            border-radius: 4px;
+            border: 1px solid #2a5a2a;
+            border-radius: 2px;
             text-align: center;
-            background: #222;
+            background: #0a120a;
+            color: #b4ffb4;
+            font-family: 'Courier New';
+            font-size: 9pt;
         }
         QProgressBar::chunk {
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                stop:0 #1a73e8, stop:1 #0d9b8c);
-            border-radius: 3px;
+                stop:0 #0a6a0a, stop:1 #00c850);
+            border-radius: 1px;
         }
         QGroupBox {
+            font-family: 'Courier New';
             font-weight: bold;
-            border: 1px solid #555;
-            border-radius: 5px;
+            font-size: 9pt;
+            border: 1px solid #2a5a2a;
+            border-radius: 3px;
             margin-top: 8px;
             padding-top: 4px;
+            color: #80ff80;
         }
         QGroupBox::title {
             subcontrol-origin: margin;
@@ -1143,45 +1176,78 @@ def koyu_tema_uygula(uygulama: QApplication):
             padding: 0 4px;
         }
         QPushButton {
-            border: 1px solid #666;
-            border-radius: 4px;
+            font-family: 'Courier New';
+            border: 1px solid #2a5a2a;
+            border-radius: 2px;
             padding: 4px 10px;
-            background: #3a3a3f;
+            background: #0e1e0e;
+            color: #b4ffb4;
         }
-        QPushButton:hover  { background: #4a4a55; }
-        QPushButton:pressed { background: #1a73e8; }
-        QPushButton:disabled { color: #777; }
+        QPushButton:hover   { background: #1a3a1a; border-color: #40a040; }
+        QPushButton:pressed { background: #005500; }
+        QPushButton:disabled { color: #3a5a3a; border-color: #1a3a1a; }
         QTabBar::tab {
+            font-family: 'Courier New';
+            font-size: 10pt;
             padding: 6px 16px;
-            background: #3a3a3f;
-            border: 1px solid #555;
+            background: #0e1e0e;
+            border: 1px solid #2a5a2a;
             border-bottom: none;
-            border-top-left-radius: 4px;
-            border-top-right-radius: 4px;
+            border-top-left-radius: 3px;
+            border-top-right-radius: 3px;
+            color: #80c080;
         }
-        QTabBar::tab:selected { background: #1a73e8; color: white; }
-        QTabBar::tab:hover:!selected { background: #4a4a55; }
+        QTabBar::tab:selected { background: #005500; color: #b4ffb4; }
+        QTabBar::tab:hover:!selected { background: #1a3a1a; }
         QListWidget {
-            border: 1px solid #555;
-            border-radius: 3px;
+            border: 1px solid #2a5a2a;
+            border-radius: 2px;
+            background: #0a0a0a;
+            color: #b4ffb4;
+            font-family: 'Courier New';
+            font-size: 9pt;
         }
         QLineEdit {
-            border: 1px solid #555;
-            border-radius: 3px;
+            font-family: 'Courier New';
+            border: 1px solid #2a5a2a;
+            border-radius: 2px;
             padding: 3px 6px;
-            background: #2a2a2e;
+            background: #0a0a0a;
+            color: #b4ffb4;
         }
         QComboBox {
-            border: 1px solid #555;
-            border-radius: 3px;
+            font-family: 'Courier New';
+            border: 1px solid #2a5a2a;
+            border-radius: 2px;
             padding: 3px 6px;
-            background: #2a2a2e;
+            background: #0a0a0a;
+            color: #b4ffb4;
         }
         QComboBox::drop-down { border: none; }
+        QComboBox QAbstractItemView {
+            background: #0a120a;
+            color: #b4ffb4;
+            selection-background-color: #005500;
+        }
         QTextEdit {
-            border: 1px solid #555;
-            border-radius: 3px;
-            background: #1e1e1e;
+            border: 1px solid #2a5a2a;
+            border-radius: 2px;
+            background: #020802;
+            color: #00e000;
+            font-family: 'Courier New';
+        }
+        QCheckBox {
+            font-family: 'Courier New';
+            color: #b4ffb4;
+        }
+        QLabel {
+            font-family: 'Courier New';
+            color: #b4ffb4;
+        }
+        QStatusBar {
+            font-family: 'Courier New';
+            font-size: 9pt;
+            color: #608060;
         }
     """)
 
