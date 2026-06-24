@@ -51,6 +51,11 @@ PKT_ACK   = 0x05
 PKT_NAK   = 0x06
 PKT_ABORT = 0x07
 
+# Clipboard (onaysiz, fire-and-forget aktarim)
+PKT_CLIP_INFO = 0x10
+PKT_CLIP_DATA = 0x11
+PKT_CLIP_EOF  = 0x12
+
 HDR_FMT  = '>4sBIH'
 HDR_SIZE = struct.calcsize(HDR_FMT)   # 4+1+4+2 = 11
 
@@ -147,6 +152,29 @@ def zip_ac(veri: bytes, sifre: str, hedef: str) -> None:
     with pyzipper.AESZipFile(buf, 'r') as zf:
         zf.setpassword(sifre.encode('utf-8'))
         zf.extractall(hedef)
+
+
+CLIP_GIRIS_ADI = 'clipboard.txt'
+
+
+def clip_zip_olustur(metin: str, sifre: str) -> bytes:
+    """Pano metnini AES sifreli bir zip icine paketler."""
+    buf = io.BytesIO()
+    with pyzipper.AESZipFile(buf, 'w',
+                              compression=pyzipper.ZIP_DEFLATED,
+                              encryption=pyzipper.WZ_AES) as zf:
+        zf.setpassword(sifre.encode('utf-8'))
+        zf.writestr(CLIP_GIRIS_ADI, metin.encode('utf-8'))
+    return buf.getvalue()
+
+
+def clip_zip_ac(veri: bytes, sifre: str) -> str:
+    """Sifreli zip'ten pano metnini cozer."""
+    buf = io.BytesIO(veri)
+    with pyzipper.AESZipFile(buf, 'r') as zf:
+        zf.setpassword(sifre.encode('utf-8'))
+        ham = zf.read(CLIP_GIRIS_ADI)
+    return ham.decode('utf-8')
 
 
 # ==============================================================================
@@ -611,6 +639,156 @@ class AlYoneticisi(QThread):
                 self.sinyal_log.emit(
                     f"Link info: {toplam} packets, {zip_boyutu:,} bytes"
                 )
+
+
+# ==============================================================================
+# CLIPBOARD THREAD'LERI  (onaysiz / fire-and-forget)
+# ==============================================================================
+
+CLIP_CHUNK    = 512
+CLIP_GECIKME  = 0.003   # paketler arasi kucuk gecikme (alici tamponunu korur)
+CLIP_TEKRAR   = 3       # kritik kontrol paketleri (INFO/EOF) tekrar sayisi
+
+
+class ClipGonderThread(QThread):
+    """Pano icerigini zip+sifre ile, alicidan onay beklemeden gonderir."""
+    sinyal_log   = pyqtSignal(str)
+    sinyal_bitti = pyqtSignal(bool, str)
+
+    def __init__(self, metin: str, sifre: str, port_adi: str, baud: int,
+                 chunk_boyutu: int = CLIP_CHUNK):
+        super().__init__()
+        self.metin        = metin
+        self.sifre        = sifre
+        self.port_adi     = port_adi
+        self.baud         = baud
+        self.chunk_boyutu = chunk_boyutu
+
+    def run(self):
+        try:
+            zip_verisi = clip_zip_olustur(self.metin, self.sifre)
+        except Exception as e:
+            self.sinyal_bitti.emit(False, f"Compression error: {e}")
+            return
+
+        try:
+            ser = serial.Serial(
+                self.port_adi, self.baud,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=1, write_timeout=5,
+                rtscts=False, dsrdtr=False
+            )
+            ser.reset_output_buffer()
+        except serial.SerialException as e:
+            self.sinyal_bitti.emit(False, f"Open failed: {e}")
+            return
+
+        try:
+            n = len(zip_verisi)
+            chunklar = [
+                zip_verisi[o:o + self.chunk_boyutu]
+                for o in range(0, n, self.chunk_boyutu)
+            ]
+            toplam = len(chunklar)
+
+            info = struct.pack('>IQ', toplam, n)
+            for _ in range(CLIP_TEKRAR):
+                ser.write(paket_olustur(PKT_CLIP_INFO, 0, info))
+                time.sleep(CLIP_GECIKME)
+
+            for i, c in enumerate(chunklar):
+                ser.write(paket_olustur(PKT_CLIP_DATA, i, c))
+                time.sleep(CLIP_GECIKME)
+
+            for _ in range(CLIP_TEKRAR):
+                ser.write(paket_olustur(PKT_CLIP_EOF, 0))
+                time.sleep(CLIP_GECIKME)
+
+            ser.flush()
+            self.sinyal_bitti.emit(
+                True, f"Clipboard sent ({toplam} packets, {n:,} bytes)."
+            )
+        except Exception as e:
+            self.sinyal_bitti.emit(False, f"Send error: {e}")
+        finally:
+            ser.close()
+
+
+class ClipDinleThread(QThread):
+    """Pano paketlerini surekli dinler; tamamlanan icerigi cozup yayinlar."""
+    sinyal_log    = pyqtSignal(str)
+    sinyal_alindi = pyqtSignal(str)
+    sinyal_durdu  = pyqtSignal()
+
+    def __init__(self, sifre: str, port_adi: str, baud: int):
+        super().__init__()
+        self.sifre    = sifre
+        self.port_adi = port_adi
+        self.baud     = baud
+        self._dur     = False
+
+    def dur(self):
+        self._dur = True
+
+    def run(self):
+        try:
+            ser = serial.Serial(
+                self.port_adi, self.baud,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=1, write_timeout=5,
+                rtscts=False, dsrdtr=False
+            )
+            ser.reset_input_buffer()
+        except serial.SerialException as e:
+            self.sinyal_log.emit(f"Open failed: {e}")
+            self.sinyal_durdu.emit()
+            return
+
+        self.sinyal_log.emit("Listening for clipboard...")
+        chunklar: Dict[int, bytes] = {}
+        toplam = 0
+        try:
+            while not self._dur:
+                try:
+                    tip, seq, veri = paket_oku(ser, 1.0)
+                except TimeoutError:
+                    continue
+
+                if tip == PKT_CLIP_INFO and len(veri) >= 12:
+                    toplam, beklenen = struct.unpack('>IQ', veri[:12])
+                    chunklar = {}
+                    self.sinyal_log.emit(
+                        f"Incoming clipboard: {toplam} packets, {beklenen:,} bytes"
+                    )
+                elif tip == PKT_CLIP_DATA:
+                    chunklar[seq] = veri
+                elif tip == PKT_CLIP_EOF:
+                    if toplam == 0:
+                        continue
+                    if len(chunklar) < toplam:
+                        eksik = toplam - len(chunklar)
+                        self.sinyal_log.emit(
+                            f"Incomplete clipboard: {eksik} packet(s) missing, discarded"
+                        )
+                    else:
+                        try:
+                            zip_verisi = b''.join(chunklar[i] for i in range(toplam))
+                            metin = clip_zip_ac(zip_verisi, self.sifre)
+                            self.sinyal_alindi.emit(metin)
+                            self.sinyal_log.emit(
+                                f"Clipboard received ({len(metin)} chars) — copied"
+                            )
+                        except Exception as e:
+                            self.sinyal_log.emit(f"Decrypt/extract error: {e}")
+                    chunklar = {}
+                    toplam = 0
+        finally:
+            ser.close()
+        self.sinyal_durdu.emit()
 
 
 # ==============================================================================
@@ -1081,6 +1259,159 @@ class AlSekmesi(QWidget):
 
 
 # ==============================================================================
+# CLIP SEKMESI
+# ==============================================================================
+
+class ClipSekmesi(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._gonder_thread: Optional[ClipGonderThread] = None
+        self._dinle_thread: Optional[ClipDinleThread] = None
+        self._ui_olustur()
+
+    def _ui_olustur(self):
+        ana = QVBoxLayout(self)
+        ana.setSpacing(8)
+
+        # --- Port settings (single port) ---
+        port_satir = QHBoxLayout()
+        self.port1 = PortSeciciWidget("COM Port")
+        port_satir.addWidget(self.port1)
+        ana.addLayout(port_satir)
+
+        # --- Encryption key ---
+        sifre_grup = QGroupBox("Encryption Key")
+        sg = QHBoxLayout(sifre_grup)
+        self.sifre_giris = QLineEdit()
+        self.sifre_giris.setEchoMode(QLineEdit.Password)
+        self.sifre_giris.setPlaceholderText("key...")
+        self.sifre_giris.setFont(QFont('Courier New', 9))
+        sg.addWidget(self.sifre_giris)
+        self.sifre_goster = QCheckBox("Show")
+        self.sifre_goster.toggled.connect(
+            lambda c: self.sifre_giris.setEchoMode(
+                QLineEdit.Normal if c else QLineEdit.Password
+            )
+        )
+        sg.addWidget(self.sifre_goster)
+        ana.addWidget(sifre_grup)
+
+        # --- Clipboard preview (no files touched) ---
+        onizleme_grup = QGroupBox("Clipboard Content")
+        og = QVBoxLayout(onizleme_grup)
+        self.onizleme = QTextEdit()
+        self.onizleme.setReadOnly(True)
+        self.onizleme.setFont(QFont('Courier New', 9))
+        self.onizleme.setMinimumHeight(140)
+        self.onizleme.setPlaceholderText(
+            "Sent / received clipboard text shown here..."
+        )
+        og.addWidget(self.onizleme)
+        ana.addWidget(onizleme_grup)
+
+        # --- Console output ---
+        log_grup = QGroupBox("Console Output")
+        lg = QVBoxLayout(log_grup)
+        self.log = LogAlani()
+        lg.addWidget(self.log)
+        ana.addWidget(log_grup)
+
+        # --- Action buttons ---
+        btn_satir = QHBoxLayout()
+        self.btn_gonder = QPushButton("SEND CLIPBOARD")
+        self.btn_gonder.setFixedHeight(42)
+        self.btn_gonder.setFont(QFont('Courier New', 11, QFont.Bold))
+        self.btn_gonder.clicked.connect(self._gonder)
+        btn_satir.addWidget(self.btn_gonder)
+
+        self.btn_dinle = QPushButton("LISTEN")
+        self.btn_dinle.setFixedHeight(42)
+        self.btn_dinle.setFixedWidth(140)
+        self.btn_dinle.setFont(QFont('Courier New', 11, QFont.Bold))
+        self.btn_dinle.setCheckable(True)
+        self.btn_dinle.clicked.connect(self._dinle_toggle)
+        btn_satir.addWidget(self.btn_dinle)
+        ana.addLayout(btn_satir)
+
+    # --- Send ---
+
+    def _gonder(self):
+        sifre = self.sifre_giris.text()
+        if not sifre:
+            QMessageBox.warning(self, "Warning", "Encryption key required.")
+            return
+        p1 = self.port1.port
+        if not p1:
+            QMessageBox.warning(self, "Warning", "COM port not selected.")
+            return
+
+        metin = QApplication.clipboard().text()
+        if not metin:
+            QMessageBox.warning(self, "Warning", "System clipboard is empty.")
+            return
+
+        self.onizleme.setPlainText(metin)
+        self.btn_gonder.setEnabled(False)
+        self.log.log_ekle(f"Sending clipboard ({len(metin)} chars)...")
+
+        self._gonder_thread = ClipGonderThread(
+            metin, sifre, p1, self.port1.baud
+        )
+        self._gonder_thread.sinyal_log.connect(self.log.log_ekle)
+        self._gonder_thread.sinyal_bitti.connect(self._gonder_bitti)
+        self._gonder_thread.start()
+
+    def _gonder_bitti(self, ok: bool, mesaj: str):
+        self.btn_gonder.setEnabled(True)
+        self.log.log_ekle(mesaj)
+        if not ok:
+            QMessageBox.critical(self, "Error", mesaj)
+
+    # --- Listen / Receive ---
+
+    def _dinle_toggle(self):
+        if self._dinle_thread and self._dinle_thread.isRunning():
+            self.btn_dinle.setEnabled(False)
+            self.log.log_ekle("Stopping listener...")
+            self._dinle_thread.dur()
+            return
+
+        sifre = self.sifre_giris.text()
+        if not sifre:
+            QMessageBox.warning(self, "Warning", "Encryption key required.")
+            self.btn_dinle.setChecked(False)
+            return
+        p1 = self.port1.port
+        if not p1:
+            QMessageBox.warning(self, "Warning", "COM port not selected.")
+            self.btn_dinle.setChecked(False)
+            return
+
+        self.btn_dinle.setText("STOP")
+        self.btn_dinle.setChecked(True)
+        self.btn_gonder.setEnabled(False)
+        self.port1.setEnabled(False)
+
+        self._dinle_thread = ClipDinleThread(sifre, p1, self.port1.baud)
+        self._dinle_thread.sinyal_log.connect(self.log.log_ekle)
+        self._dinle_thread.sinyal_alindi.connect(self._alindi)
+        self._dinle_thread.sinyal_durdu.connect(self._dinle_durdu)
+        self._dinle_thread.start()
+
+    def _alindi(self, metin: str):
+        QApplication.clipboard().setText(metin)
+        self.onizleme.setPlainText(metin)
+
+    def _dinle_durdu(self):
+        self.btn_dinle.setEnabled(True)
+        self.btn_dinle.setChecked(False)
+        self.btn_dinle.setText("LISTEN")
+        self.btn_gonder.setEnabled(True)
+        self.port1.setEnabled(True)
+        self.log.log_ekle("Listener stopped.")
+
+
+# ==============================================================================
 # ANA PENCERE
 # ==============================================================================
 
@@ -1109,6 +1440,7 @@ class AnaPencere(QMainWindow):
         sekmeler = QTabWidget()
         sekmeler.addTab(GonderSekmesi(), "  [ TX ]  ")
         sekmeler.addTab(AlSekmesi(),     "  [ RX ]  ")
+        sekmeler.addTab(ClipSekmesi(),   "  [ CLIP ]  ")
         sekmeler.setFont(QFont('Courier New', 10))
         ana.addWidget(sekmeler)
 
