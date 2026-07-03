@@ -22,7 +22,8 @@ jobs:
 
       - name: Bagimliliklari yukle
         run: |
-          pip install pyqt5 pyserial pyzipper pyinstaller
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
 
       - name: EXE olustur
         run: |
@@ -40,3 +41,4 @@ jobs:
           name: RS232Transfer-Windows
           path: dist/RS232Transfer.exe
           retention-days: 30
+          if-no-files-found: error   # EXE uretilmediyse build'i basarisiz say

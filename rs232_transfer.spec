@@ -6,9 +6,16 @@ Kullanim:
 """
 
 import sys
-from PyInstaller.building.build_main import Analysis, PYZ, EXE, COLLECT
+from PyInstaller.building.build_main import Analysis, PYZ, EXE
+from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
+
+# pyzipper AES sifreleme icin `pycryptodomex` (Cryptodome ad alani) kullanir —
+# `Crypto` (pycryptodome) DEGIL. Tum Cryptodome alt modulleri ve C uzantilari
+# EXE'ye eksiksiz girsin diye topluca dahil ediyoruz; aksi halde EXE derlenir
+# ama sifreli zip olustururken/acarken calistirilinca cokerdi.
+cryptodome_gizli = collect_submodules('Cryptodome')
 
 a = Analysis(
     ['rs232_transfer.py'],
@@ -28,10 +35,7 @@ a = Analysis(
         'PyQt5.QtCore',
         'PyQt5.QtGui',
         'PyQt5.sip',
-        'Crypto',
-        'Crypto.Cipher',
-        'Crypto.Cipher.AES',
-    ],
+    ] + cryptodome_gizli,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -55,7 +59,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,          # UPX GitHub Actions runner'inda kurulu degil; etkisiz
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,          # GUI uygulama — konsol penceresi acilmasin
