@@ -183,6 +183,52 @@ class ProtokolTestleri(unittest.TestCase):
             self.assertEqual(seq, i)
             self.assertEqual(veri, f'chunk-{i}'.encode())
 
+    def test_tek_okumada_coklu_paket(self):
+        """
+        Regresyon: Cok sayida paket tek bir okumada (in_waiting hepsini birden
+        dondururken) geldiginde hicbiri kaybolmamali.
+
+        Onceki hata: paket_oku her cagride yerel bir 'buf' olusturup bir paket
+        dondurdukten sonra kalan baytlari (birden fazla paket) atiyordu. Bu,
+        clipboard'un onaysiz/arka arkaya paket akisinda 'missing packet' olarak
+        goruluyordu. Tampon artik seri porta bagli oldugu icin kayip olmamali.
+        """
+        a, b = port_cifti_olustur(timeout=3.0)
+        N = 50
+        # Tek write → tum paketler tek blok halinde; b.in_waiting hepsini birden verir
+        blob = b''.join(
+            paket_olustur(PKT_DATA, i, f'chunk-{i:03d}'.encode())
+            for i in range(N)
+        )
+        a.write(blob)
+
+        alinan = []
+        for _ in range(N):
+            tip, seq, veri = paket_oku(b, bekleme=5.0)
+            self.assertEqual(tip, PKT_DATA)
+            alinan.append((seq, veri))
+
+        self.assertEqual([s for s, _ in alinan], list(range(N)),
+                         "Tek okumada gelen paketler kayboldu!")
+        for s, veri in alinan:
+            self.assertEqual(veri, f'chunk-{s:03d}'.encode())
+
+    def test_kismi_paket_sonra_tamamlanir(self):
+        """
+        Regresyon: Bir paket birden fazla okumaya bolunerek gelirse (once yarim
+        header/govde, sonra gerisi) tampon korunmali ve paket tamamlanmali.
+        """
+        a, b = port_cifti_olustur(timeout=3.0)
+        pkt = paket_olustur(PKT_DATA, 7, b'bolunmus-veri-parcasi')
+        # Paketi iki ayri write ile, ortasindan bolerek gonder
+        orta = len(pkt) // 2
+        a.write(pkt[:orta])
+        a.write(pkt[orta:])
+        tip, seq, veri = paket_oku(b, bekleme=5.0)
+        self.assertEqual(tip, PKT_DATA)
+        self.assertEqual(seq, 7)
+        self.assertEqual(veri, b'bolunmus-veri-parcasi')
+
     def test_timeout_firlatir(self):
         """Veri gelmediginde TimeoutError firlatmali."""
         _, b = port_cifti_olustur(timeout=0.1)

@@ -77,7 +77,14 @@ def paket_oku(ser: serial.Serial, bekleme: float = 10.0) -> Tuple[int, int, byte
     Seri porttan gecerli bir paket okur.
     (tip, seq, veri) dondurur veya TimeoutError firlatir.
     """
-    buf = bytearray()
+    # Tampon seri porta baglanir; boylece bir cagride okunup da o an
+    # islenmeyen (birden fazla paketlik) baytlar kaybolmaz, sonraki
+    # cagrida kullanilir. (Clipboard gibi arka arkaya paket akislarinda kritik.)
+    buf = getattr(ser, '_paket_buf', None)
+    if buf is None:
+        buf = bytearray()
+        ser._paket_buf = buf
+
     bitis = time.monotonic() + bekleme
 
     while True:
@@ -95,10 +102,12 @@ def paket_oku(ser: serial.Serial, bekleme: float = 10.0) -> Tuple[int, int, byte
         while len(buf) >= HDR_SIZE + 4:
             idx = bytes(buf).find(MAGIC)
             if idx == -1:
-                buf = buf[-3:] if len(buf) > 3 else buf
+                # Kismi MAGIC olabilir; son 3 bayti sakla, gerisini at.
+                if len(buf) > 3:
+                    del buf[:-3]
                 break
             if idx > 0:
-                buf = buf[idx:]
+                del buf[:idx]
 
             if len(buf) < HDR_SIZE:
                 break
@@ -106,7 +115,7 @@ def paket_oku(ser: serial.Serial, bekleme: float = 10.0) -> Tuple[int, int, byte
             try:
                 _, tip, seq, veri_uzunlugu = struct.unpack(HDR_FMT, bytes(buf[:HDR_SIZE]))
             except struct.error:
-                buf = buf[4:]
+                del buf[:4]
                 continue
 
             toplam = HDR_SIZE + veri_uzunlugu + 4
